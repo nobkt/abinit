@@ -400,6 +400,78 @@ MnF₂のような反強磁性体では、スピン反転感受率のk依存性�
 - `src/68_dmft/m_dmft_lattice_bse.F90` — `kpoint_chi0_attrib_type`、`init/destroy/write_kpoint_chi0_attrib` 追加、`compute_chi0_lattice` のオプション拡張
 - `src/68_dmft/m_dmft_absorption_driver.F90` — Stage 4a 追加、kpt_attrib 初期化/破壊
 
+#### 17. k 点分解格子バブルの軌道分解（Phase 18: 完了）
+
+**目的:** Phase 17 で実装した k 点分解帰属を軌道ペアレベルまで拡張し、ブリルアンゾーンの各 k 点においてどの d 軌道間遷移がスピン反転感受率に寄与しているかを同定できるようにする
+
+**実装した内容:**
+
+1. **`kpoint_chi0_attrib_type` の軌道分解拡張**: 既存の k 点スピンチャネルトレース (`chi0_k_pm`, `chi0_k_mp`) に加え、軌道ペア分解の4次元配列を追加:
+   - `chi0_k_pm_orb(nboson, nkpt, ndim_orb, ndim_orb)` — 各 k 点における S⁺S⁻ チャネルの軌道ペア (m, m') 分解
+   - `chi0_k_mp_orb(nboson, nkpt, ndim_orb, ndim_orb)` — 各 k 点における S⁻S⁺ チャネルの軌道ペア分解
+
+2. **`compute_chi0_lattice` の軌道分解ロジック追加**: 既存の per-k スピンチャネル分類ブロック内で、S⁺S⁻ と S⁻S⁺ に分類されたバブル寄与を、さらに軌道ペアに分解して蓄積。軌道添字の抽出は `compute_spectral_attribution` と同一の規約を使用:
+   - S⁺S⁻ case: `im_a = ialpha`（spin-up 軌道添字）, `im_b = ibeta - ndim_orb`（spin-down 軌道添字）
+   - S⁻S⁺ case: `im_a = ialpha - ndim_orb`（spin-down 軌道添字）, `im_b = ibeta`（spin-up 軌道添字）
+
+3. **`init/destroy_kpoint_chi0_attrib` の更新**: 新規配列の allocate/deallocate を追加。`ladd=.false.` 時のゼロ初期化にも対応。
+
+4. **`write_kpoint_chi0_attrib` に2つの新セクション追加**:
+   - **Section 3: Per-k orbital-resolved S⁺S⁻ at iΩ=0** — 各 k 点における全軌道ペア (m, m') の S⁺S⁻ 寄与を出力。静的極限（iΩ=0）でのデータを出力する。
+   - **Section 4: Global ranking of dominant (k, m, m') for S⁺S⁻ at iΩ=0** — 全 (k, m, m') の組み合わせを |χ₀^{+-}_{mm'}(k, 0)| の降順にソートし、上位20件を出力。これにより、スピン反転感受率に最も大きく寄与する「k 点 × 軌道遷移」の組み合わせを直接同定できる。
+
+5. **整合性の保証**: per-k 軌道分解データの k 点和は、格子レベルの軌道分解帰属（`DMFT_attrib_chi0_lattice.dat` の `chi_pm_orbital`）と一致する:
+   ```
+   Σ_k chi0_k_pm_orb(iΩ, k, m, m') = chi_pm_orbital(iΩ, m, m') [格子レベル]
+   ```
+   この整合性はコードの構造から自動的に保証されるが、出力ファイルでの検証も可能である。
+
+**物理的意味:**
+
+MnF₂ の反強磁性体において、スピン反転感受率が特定の k 点の特定の軌道遷移に集中しているかどうかを同定できる。例えば:
+- BZ 端の X 点付近で特定の eg → t2g 遷移がスピン反転感受率を支配している場合、それは反強磁性的なスピン相関による特定の d-d 遷移の増強を示す
+- 逆に、寄与が k 空間で一様に分布している場合、局所（不純物レベル）の帰属で十分であることを意味する
+
+**メモリ考慮:** `chi0_k_pm_orb` の配列サイズは nboson × nkpt × ndim_orb² の複素数。Mn 3d（ndim_orb=5）、nboson=50、nkpt=100 で約 1.25M × 16 bytes = 20 MB。これは格子バブル行列自体（ndim_comp² × nboson ~ 数十 GB）に比べて無視できる。
+
+**変更ファイル:**
+- `src/68_dmft/m_dmft_lattice_bse.F90` — `kpoint_chi0_attrib_type` に `chi0_k_pm_orb`, `chi0_k_mp_orb` 追加、`compute_chi0_lattice` での軌道分解、`write_kpoint_chi0_attrib` の Section 3-4 追加
+- （ドライバ側の変更は不要: 既存の `kpt_attrib` データフローが新規配列を自動的に処理する）
+
+#### 18. 周波数依存帰属プロファイル（Phase 19: 完了）
+
+**目的:** 各ボソン Matsubara 周波数において支配的なスピンチャネルと軌道ペアを自動同定し、エネルギースケールに依存した帰属変化を検出できるようにする
+
+**実装した内容:**
+
+1. **`write_frequency_profile` サブルーチンの追加**: `m_dmft_spectral_attribution.F90` に新規公開サブルーチンを追加。以下の3セクションからなるプロファイルファイルを出力:
+
+   - **Section 1: Channel fractions vs bosonic frequency** — 各ボソン周波数 iΩₘ における |χ_total|, |χ_sc|, |χ_pm|, |χ_mp| と、それらの分率（frac_sc, frac_pm, frac_mp）を出力。また、各周波数で支配的なチャネルを `spin-conserving` / `S+S-` / `S-S+` として明示。
+
+   - **Section 2: Dominant orbital pair at each frequency** — 各ボソン周波数において、|χ^{+-}_{mm'}| が最大となる軌道ペア (m, m') と |χ^{-+}_{mm'}| が最大となる軌道ペアを出力。軌道キャラクターが周波数（≒エネルギースケール）で変化するかどうかを直接同定できる。
+
+   - **Section 3: Frequency stability of dominant channels** — 静的極限（iΩ=0）での支配的チャネルが全周波数で一貫しているかを診断。一貫している場合は単一の励起メカニズムが支配的であることを意味し、変化する場合は複数のエネルギースケールで異なるメカニズムが存在することを意味する。
+
+2. **ドライバからの3段階呼び出し**: IMP / LATT / BSE の各レベルの帰属計算直後にプロファイルを出力:
+   - `DMFT_attrib_freqprofile_imp.dat` — 不純物バブルの周波数プロファイル
+   - `DMFT_attrib_freqprofile_latt.dat` — 格子バブルの周波数プロファイル
+   - `DMFT_attrib_freqprofile_bse.dat` — BSE 全感受率の周波数プロファイル
+
+**物理的意味:**
+
+吸収スペクトルにおいて、異なるエネルギー領域で異なる励起メカニズムが支配的である場合がある。例えば:
+- 低エネルギー（小さいΩ）ではスピン保存チャネルが支配的で、高エネルギーではスピン反転チャネルが増大する場合、それは特定の多体励起エネルギーを超えるとスピン反転過程が活性化することを意味する
+- 軌道キャラクターが周波数で変化する場合、異なる d 軌道遷移が異なるエネルギースケールに対応していることを示す
+
+**注意点:**
+- これは Matsubara 軸上の解析であり、実周波数の吸収スペクトルとの直接的な対応ではない。Matsubara 周波数 iΩₘ = i2πm/β の増加は実周波数 ω の増加と単調な対応関係にあるが、その対応は解析接続を通じた非自明なものである
+- 支配的チャネルの同定は各周波数での |χ| の大小比較であり、ヒューリスティックな処理ではない
+- 解析接続は一切行っていない
+
+**変更ファイル:**
+- `src/68_dmft/m_dmft_spectral_attribution.F90` — `write_frequency_profile` 追加
+- `src/68_dmft/m_dmft_absorption_driver.F90` — 3段階プロファイル出力追加、use 文更新
+
 ### 正直な到達点の評価
 
 **現時点で完成しているもの:**
@@ -416,6 +488,8 @@ MnF₂のような反強磁性体では、スピン反転感受率のk依存性�
 - **レベル間帰属比較**（不純物/格子/BSE の3段階を一つのファイルで比較、差分出力付き）
 - **帰属サマリーの物理量抽出**（静的感受率、チャネル分率、Matsubara 収束診断、軌道ランキング）
 - **k 点分解格子バブル帰属**（各 k 点のスピンチャネルトレースを分類・出力）
+- **k 点分解軌道ペア帰属**（各 k 点における S⁺S⁻ 軌道ペア分解、支配的 (k,m,m') ランキング）
+- **周波数依存帰属プロファイル**（各ボソン周波数での支配チャネル/軌道同定、周波数安定性診断）
 - 既約頂点抽出の行列演算（Γ = χ₀⁻¹ − χ⁻¹）
 - 格子 BSE 解法の行列演算（χ = [χ₀⁻¹ − Γ]⁻¹）
 - Matsubara 軸での出力フォーマット
@@ -432,15 +506,18 @@ MnF₂のような反強磁性体では、スピン反転感受率のk依存性�
 
 ## 次ステップで実装すべきこと
 
-### 次ステップ 0: 帰属機能の統合検証（Phase 16-17 の検証）
+### 次ステップ 0: 帰属機能の統合検証（Phase 16-19 の検証）
 
-**目的:** Phase 16-17 で追加した帰属サマリーと k 点分解帰属が、既存の帰属出力と定量的に整合することを確認する
+**目的:** Phase 16-19 で追加した帰属サマリー、k 点分解帰属、k 点軌道分解帰属、周波数プロファイルが、既存の帰属出力と定量的に整合することを確認する
 
 **具体的な検証項目:**
 1. `DMFT_attrib_summary_imp.dat` の static susceptibility が `DMFT_attrib_chi0_imp_total.dat` の iΩ=0 行と一致すること
 2. `DMFT_attrib_chi0_kpoint.dat` の全 k 点和（Σ_k chi0_k_total）が `DMFT_attrib_chi0_lattice.dat` の total trace と一致すること
-3. k 点帰属の ladd=.true. 累積が正しく動作すること（多原子系で全原子の寄与が蓄積されること）
-4. Matsubara 収束診断の閾値（0.01）が適切かどうかを実際の計算で評価
+3. **`DMFT_attrib_chi0_kpoint.dat` Section 3 の k 点和（Σ_k chi0_k_pm_orb(iΩ=0, k, m, m')）が `DMFT_attrib_chi0_lattice.dat` の chi_pm_orbital(iΩ=0, m, m') と一致すること**（Phase 18 の検証）
+4. **`DMFT_attrib_freqprofile_*.dat` の Section 1 の frac_sc + frac_pm + frac_mp ≈ 1 が全周波数で成立すること**（Phase 19 の検証）
+5. k 点帰属の ladd=.true. 累積が正しく動作すること（多原子系で全原子の寄与が蓄積されること）
+6. Matsubara 収束診断の閾値（0.01）が適切かどうかを実際の計算で評価
+7. **Section 4 のグローバルランキングが正しくソートされていること**
 
 **必要条件:** 実際の DFT+DMFT 計算を実行するテスト環境（MnF₂ の入力ファイル + TRIQS/CT-HYB）
 
@@ -564,12 +641,20 @@ MnF₂のような反強磁性体では、スピン反転感受率のk依存性�
 
 10. **多原子格子バブル（実装済み）**: 全相関原子（lpawu == maxlpawu）の投影子からの寄与を累積した格子バブルに対して帰属分解を適用。
 
+11. **k 点分解軌道ペア帰属（実装済み）**: Phase 17 の k 点スピンチャネルトレースを軌道ペアレベルまで拡張。各 k 点における S⁺S⁻ / S⁻S⁺ の軌道ペア (m, m') 分解を保持し、`DMFT_attrib_chi0_kpoint.dat` の Section 3-4 として出力。Section 4 では全 (k, m, m') の組み合わせを |χ₀^{+-}_{mm'}(k, 0)| の降順にソートしたグローバルランキング（上位20件）を提供。
+
+12. **周波数依存帰属プロファイル（実装済み）**: 各ボソン Matsubara 周波数における支配的スピンチャネルと軌道ペアを自動同定する `DMFT_attrib_freqprofile_*.dat`。3つのセクション:
+    - チャネル分率 vs 周波数（frac_sc, frac_pm, frac_mp の周波数依存性）
+    - 支配的軌道ペア vs 周波数（各周波数で最大の |χ^{+-}_{mm'}| を持つ (m, m') ペア）
+    - 周波数安定性診断（支配チャネルが全周波数で一貫するかの判定）
+
 ### 今後実装すべき帰属機能
 
 11. ~~**k 点分解**: 逆格子空間での寄与の分布を出力する~~ → **Phase 17 で実装済み**
 12. **光学応答の帰属**: 光学伝導度 Π_μν を軌道対ごとに分解し、各吸収ピークの軌道起源を同定する（電流行列要素実装後）
 13. **原子間交差項の帰属**: 異なる原子間の交差寄与を格子バブルレベルで分解する（lpawu が異なる原子を含む系向け）
-14. **k 点分解の軌道分解**: 各 k 点における軌道ペア分解 S⁺S⁻ 感受率を出力する（Phase 17 の拡張）
+14. ~~**k 点分解の軌道分解**: 各 k 点における軌道ペア分解 S⁺S⁻ 感受率を出力する（Phase 17 の拡張）~~ → **Phase 18 で実装済み**
+15. ~~**周波数依存帰属プロファイル**: 各ボソン周波数での支配チャネル/軌道ペアの同定~~ → **Phase 19 で実装済み**
 
 ### 帰属出力ファイル一覧
 
@@ -578,11 +663,14 @@ MnF₂のような反強磁性体では、スピン反転感受率のk依存性�
 | `DMFT_attrib_chi0_imp_atom{N}.dat` | 不純物（原子別） | 原子 N の chi0_imp のスピン/軌道帰属 |
 | `DMFT_attrib_chi0_imp_total.dat` | 不純物（合算） | 全原子合算の chi0_imp のスピン/軌道帰属 |
 | `DMFT_attrib_summary_imp.dat` | 不純物サマリー | 静的感受率・チャネル分率・収束診断・軌道ランキング |
+| `DMFT_attrib_freqprofile_imp.dat` | 不純物プロファイル | 周波数依存帰属プロファイル（支配チャネル/軌道） |
 | `DMFT_attrib_chi0_lattice.dat` | 格子バブル | 格子バブル chi0_latt のスピン/軌道帰属 |
-| `DMFT_attrib_chi0_kpoint.dat` | 格子バブル（k分解） | k 点分解のスピンチャネルトレース |
+| `DMFT_attrib_chi0_kpoint.dat` | 格子バブル（k分解） | k 点分解スピンチャネル + 軌道ペア分解 + ランキング |
 | `DMFT_attrib_summary_latt.dat` | 格子サマリー | 格子レベルの静的感受率・軌道ランキング |
+| `DMFT_attrib_freqprofile_latt.dat` | 格子プロファイル | 周波数依存帰属プロファイル（支配チャネル/軌道） |
 | `DMFT_attrib_chi_full.dat` | BSE 全感受率 | BSE 補正後 chi_full のスピン/軌道帰属 |
 | `DMFT_attrib_summary_bse.dat` | BSE サマリー | BSE レベルの静的感受率・軌道ランキング |
+| `DMFT_attrib_freqprofile_bse.dat` | BSE プロファイル | 周波数依存帰属プロファイル（支配チャネル/軌道） |
 | `DMFT_attrib_comparison.dat` | レベル間比較 | 不純物/格子/BSE の3段階比較（差分付き） |
 
 ---

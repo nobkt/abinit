@@ -588,6 +588,33 @@ subroutine dmft_solve(cryst_struc,dtset,istep,dft_occup,mpi_enreg,paw_dmft,pawan
 !== DFT+DMFT response (absorption spectrum) calculation
 !   Called while the converged Green function is still available.
  if (dtset%dmft_resp_mode > 0) then
+
+   ! Two-particle measurement: re-run the impurity solver with G2_iw_ph enabled
+   ! This is done AFTER DMFT convergence, with the converged bath fixed.
+   ! The measured G2 data is stored in paw_dmft%chi_imp_g2_data.
+   if (dtset%dmft_resp_current_vertex == 1 .and. &
+     & (paw_dmft%dmft_solv == 6 .or. paw_dmft%dmft_solv == 7)) then
+
+     write(message,'(3a)') ch10, &
+     ' === Re-running impurity solver with G2_iw_ph measurement ===', ch10
+     call wrtout(std_out,message,'COLL')
+
+     ! Set G2 measurement parameters in paw_dmft
+     paw_dmft%chi_imp_g2_nboson = dtset%dmft_resp_nboson
+     paw_dmft%chi_imp_g2_niw = dtset%dmft_resp_niw_vertex
+
+     call ctqmc_calltriqs_c(paw_dmft,green,self,hu(:),weiss,self_new,pawprtvol, &
+       & measure_g2=.true.)
+
+     if (paw_dmft%has_chi_imp_g2 == 1) then
+       write(message,'(a)') ' Two-particle measurement complete. G2 data available.'
+       call wrtout(std_out,message,'COLL')
+     else
+       write(message,'(a)') ' WARNING: Two-particle measurement did not produce G2 data.'
+       call wrtout(std_out,message,'COLL')
+     end if
+   end if
+
    call dmft_absorption_run(dtset, paw_dmft, cryst_struc, green)
  end if
 

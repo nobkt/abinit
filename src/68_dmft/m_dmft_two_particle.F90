@@ -43,6 +43,7 @@ MODULE m_dmft_two_particle
  public :: destroy_chi_loc
  public :: compute_chi0_imp
  public :: write_chi_loc
+ public :: fill_chi_loc_from_g2
 
 !!***
 
@@ -390,5 +391,131 @@ integer function open_file(fname, msg, newunit, form, action)
    open_file = 1
  end if
 end function open_file
+
+!!****f* m_dmft_two_particle/fill_chi_loc_from_g2
+!! NAME
+!!  fill_chi_loc_from_g2
+!!
+!! FUNCTION
+!!  Convert the flattened G2_iw_ph array (from TRIQS CT-HYB) into chi_loc_type format.
+!!
+!!  The G2 data from TRIQS stores the connected two-particle Green function
+!!  G^(2)_connected in the particle-hole channel with Fourier convention:
+!!
+!!    G^(2)_{abcd}(iw, iw'; iOm) = <T c†_a(iw) c_b(iw+iOm) c†_c(iw'+iOm) c_d(iw')>_conn
+!!
+!!  The physical susceptibility chi = -G^(2)_connected (Section 5.7 of design doc).
+!!
+!!  The input G2 array has layout:
+!!    index = ((((iOm*niw + iw)*niw + iwp)*norb + a)*norb + b)*norb*norb + c*norb + d
+!!  with 0-based indices.
+!!
+!!  The output chi_loc_type has layout:
+!!    chi_mat(iOm, I, J) where I=(n-1)*norb^2 + (alpha-1)*norb + beta (1-based)
+!!
+!!  Convention mapping (design doc Section 5.7):
+!!    alpha <-> a (creation at tau_1)
+!!    beta  <-> b (annihilation at tau_2)
+!!    gamma <-> c (creation at tau_3)
+!!    delta <-> d (annihilation at tau_4=0)
+!!
+!! INPUTS
+!!  g2_data(g2_size) = flattened G2 array from TRIQS
+!!  norb = number of spinor-orbitals (= nflavor in TRIQS)
+!!  niw = number of fermionic Matsubara frequencies (positive only)
+!!  nboson = number of bosonic Matsubara frequencies (positive, including 0)
+!!
+!! SIDE EFFECTS
+!!  chi = on output, filled with chi = -G2 in composite index format
+!!
+!! SOURCE
+
+subroutine fill_chi_loc_from_g2(chi, g2_data, norb, niw, nboson)
+
+ type(chi_loc_type), intent(inout) :: chi
+ complex(dp), intent(in) :: g2_data(:)
+ integer, intent(in) :: norb, niw, nboson
+
+!Local variables
+ integer :: iom, iw, iwp, ialpha, ibeta, igamma, idelta
+ integer :: idx_i, idx_j, norb_sq
+ integer(8) :: g2_idx, norb_i8, niw_i8
+ complex(dp) :: g2_val
+ character(len=500) :: msg
+
+! *********************************************************************
+
+ write(msg,'(a,3(a,i6))') &
+ ' fill_chi_loc_from_g2: Converting G2 data to chi_loc.', &
+ ' norb=', norb, ' niw=', niw, ' nboson=', nboson
+ call wrtout(std_out, msg)
+
+ ! Validate dimensions match
+ if (chi%norb_corr /= norb) then
+   write(msg,'(a,i6,a,i6)') &
+   'fill_chi_loc_from_g2: norb mismatch. chi%norb_corr=', chi%norb_corr, ' norb=', norb
+   ABI_ERROR(msg)
+ end if
+ if (chi%niw_vertex /= niw) then
+   write(msg,'(a,i6,a,i6)') &
+   'fill_chi_loc_from_g2: niw mismatch. chi%niw_vertex=', chi%niw_vertex, ' niw=', niw
+   ABI_ERROR(msg)
+ end if
+ if (chi%nboson /= nboson) then
+   write(msg,'(a,i6,a,i6)') &
+   'fill_chi_loc_from_g2: nboson mismatch. chi%nboson=', chi%nboson, ' nboson=', nboson
+   ABI_ERROR(msg)
+ end if
+
+ norb_sq = norb * norb
+ norb_i8 = int(norb, 8)
+ niw_i8 = int(niw, 8)
+
+ ! Zero out chi_mat
+ chi%chi_mat = czero
+
+ ! Loop over all indices and convert G2 to chi
+ ! chi_{alpha,beta,gamma,delta}(iw,iw';iOm) = -G2_{alpha,beta,gamma,delta}(iw,iw';iOm)
+ !
+ ! G2 index (0-based): ((((iOm*niw + iw)*niw + iwp)*norb + alpha)*norb + beta)*norb^2 + gamma*norb + delta
+ ! chi index (1-based): I = (iw-1)*norb^2 + (alpha-1)*norb + beta
+ !                       J = (iwp-1)*norb^2 + (gamma-1)*norb + delta
+
+ do iom = 1, nboson
+   do iw = 1, niw
+     do iwp = 1, niw
+       do ialpha = 1, norb
+         do ibeta = 1, norb
+           do igamma = 1, norb
+             do idelta = 1, norb
+
+               ! G2 flat index (0-based)
+               g2_idx = ((((int(iom-1,8)*niw_i8 + int(iw-1,8))*niw_i8 + int(iwp-1,8))*norb_i8 &
+                 & + int(ialpha-1,8))*norb_i8 + int(ibeta-1,8))*norb_i8*norb_i8 &
+                 & + int(igamma-1,8)*norb_i8 + int(idelta-1,8)
+
+               ! chi composite indices (1-based)
+               idx_i = (iw - 1) * norb_sq + (ialpha - 1) * norb + ibeta
+               idx_j = (iwp - 1) * norb_sq + (igamma - 1) * norb + idelta
+
+               ! Read G2 value and apply sign convention: chi = -G2
+               g2_val = g2_data(g2_idx + 1) ! +1 for Fortran 1-based array
+
+               chi%chi_mat(iom, idx_i, idx_j) = -g2_val
+
+             end do
+           end do
+         end do
+       end do
+     end do
+   end do
+ end do
+
+ write(msg,'(a)') ' fill_chi_loc_from_g2: Conversion complete. chi = -G2.'
+ call wrtout(std_out, msg)
+
+end subroutine fill_chi_loc_from_g2
+
+!!***
 
 END MODULE m_dmft_two_particle

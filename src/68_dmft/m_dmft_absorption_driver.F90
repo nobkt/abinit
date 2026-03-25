@@ -40,7 +40,7 @@ MODULE m_dmft_absorption_driver
  use m_crystal, only : crystal_t
  use m_green, only : green_type
  use m_dmft_two_particle, only : chi_loc_type, init_chi_loc, destroy_chi_loc, &
-                                & compute_chi0_imp, write_chi_loc
+                                & compute_chi0_imp, write_chi_loc, fill_chi_loc_from_g2
  use m_dmft_vertex, only : vertex_irr_type, init_vertex_irr, destroy_vertex_irr, &
                           & extract_vertex_irr
  use m_dmft_lattice_bse, only : lattice_bse_type, init_lattice_bse, destroy_lattice_bse, &
@@ -250,19 +250,48 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc, green_imp)
  ! =====================================================================
  ! Stage 2: Two-particle measurement from impurity solver
  ! =====================================================================
- write(msg,'(3a)') &
- ' Stage 2: Local two-particle correlation function measurement.',ch10,&
- ' WARNING: TRIQS two-particle measurement interface not yet connected.'
+ write(msg,'(a)') ' Stage 2: Local two-particle correlation function chi_imp'
  call wrtout(std_out, msg)
 
  call init_chi_loc(chi_loc, norb_corr, niw_vertex, nboson)
- ! chi_loc%chi_mat would be filled by the TRIQS interface extension.
- ! For now, chi_loc remains zero (placeholder for future TRIQS integration).
 
- write(msg,'(3a)') &
- ' WARNING: chi_loc is zero (TRIQS two-particle interface not connected).',ch10,&
- ' Vertex extraction and BSE results will be trivial until this is implemented.'
- call wrtout(std_out, msg)
+ if (paw_dmft%has_chi_imp_g2 == 1 .and. allocated(paw_dmft%chi_imp_g2_data)) then
+   ! G2 data is available from TRIQS measurement
+   write(msg,'(a)') &
+   '   G2_iw_ph data available from TRIQS. Converting to chi_loc (chi = -G2).'
+   call wrtout(std_out, msg)
+
+   if (paw_dmft%chi_imp_g2_norb /= norb_corr) then
+     write(msg,'(a,i6,a,i6)') &
+     ' WARNING: G2 norb (', paw_dmft%chi_imp_g2_norb, &
+     ') differs from norb_corr (', norb_corr, '). chi_loc remains zero.'
+     call wrtout(std_out, msg)
+   else if (paw_dmft%chi_imp_g2_nboson /= nboson) then
+     write(msg,'(a,i6,a,i6)') &
+     ' WARNING: G2 nboson (', paw_dmft%chi_imp_g2_nboson, &
+     ') differs from nboson (', nboson, '). chi_loc remains zero.'
+     call wrtout(std_out, msg)
+   else if (paw_dmft%chi_imp_g2_niw /= niw_vertex) then
+     write(msg,'(a,i6,a,i6)') &
+     ' WARNING: G2 niw (', paw_dmft%chi_imp_g2_niw, &
+     ') differs from niw_vertex (', niw_vertex, '). chi_loc remains zero.'
+     call wrtout(std_out, msg)
+   else
+     call fill_chi_loc_from_g2(chi_loc, paw_dmft%chi_imp_g2_data, &
+       & norb_corr, niw_vertex, nboson)
+     write(msg,'(a)') '   chi_loc filled from G2 measurement.'
+     call wrtout(std_out, msg)
+
+     ! Write measured chi_imp for diagnostics
+     call write_chi_loc(chi_loc, 'DMFT_chi_imp_measured.dat')
+   end if
+ else
+   ! G2 data not available - chi_loc remains zero (bubble approximation)
+   write(msg,'(3a)') &
+   ' WARNING: chi_loc is zero (G2 measurement data not available).',ch10,&
+   ' Vertex will be zero and BSE results will equal the bubble approximation.'
+   call wrtout(std_out, msg)
+ end if
 
  ! =====================================================================
  ! Stage 3: Extract irreducible vertex

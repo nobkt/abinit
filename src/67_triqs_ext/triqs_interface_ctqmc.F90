@@ -29,7 +29,8 @@ MODULE TRIQS_CTQMC
                               & ntherm_restart,det_init_size,det_n_operations_before_check,rank,nblocks,read_data,verbo,beta, &
                               & imag_threshold,det_precision_warning,det_precision_error,det_singular_threshold,lam_u,pauli_prob, &
                               & block_list,flavor_list,inner_list,siz_list,ftau,gtau,gl,udens_cmplx,vee_cmplx,levels_cmplx,moments_self_1, &
-                              & moments_self_2,occ,eu,fname_data,fname_dataw,fname_histo) bind(c)
+                              & moments_self_2,occ,eu,fname_data,fname_dataw,fname_histo, &
+                              & measure_g2,g2_n_bosonic,g2_n_fermionic,g2_data,g2_data_size) bind(c)
 
       use iso_c_binding
 
@@ -44,6 +45,12 @@ MODULE TRIQS_CTQMC
       TYPE(C_PTR), VALUE, INTENT(IN) :: block_list,flavor_list,inner_list,siz_list,ftau,gtau,gl,udens_cmplx,vee_cmplx,levels_cmplx
 
       TYPE(C_PTR), VALUE, INTENT(IN) :: moments_self_1,moments_self_2,occ,eu,fname_data,fname_dataw,fname_histo
+
+      LOGICAL, VALUE, INTENT(IN) :: measure_g2
+
+      INTEGER, VALUE, INTENT(IN) :: g2_n_bosonic,g2_n_fermionic,g2_data_size
+
+      TYPE(C_PTR), VALUE, INTENT(IN) :: g2_data
 
     end subroutine Ctqmc_triqs_run
 

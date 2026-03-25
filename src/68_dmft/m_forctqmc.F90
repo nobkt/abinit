@@ -3322,7 +3322,7 @@ end subroutine ctqmc_calltriqs
 !!
 !! SOURCE
 
-subroutine ctqmc_calltriqs_c(paw_dmft,green,self,hu,weiss,self_new,pawprtvol)
+subroutine ctqmc_calltriqs_c(paw_dmft,green,self,hu,weiss,self_new,pawprtvol,measure_g2)
 
 #if defined HAVE_TRIQS_INTERNAL || defined HAVE_TRIQS_v3_2
  use TRIQS_CTQMC
@@ -3331,11 +3331,17 @@ subroutine ctqmc_calltriqs_c(paw_dmft,green,self,hu,weiss,self_new,pawprtvol)
 
 !Arguments ------------------------------------
  integer, intent(in) :: pawprtvol
- type(paw_dmft_type), intent(in) :: paw_dmft
+ type(paw_dmft_type), intent(inout) :: paw_dmft
  type(green_type), target, intent(inout) :: green,weiss
  type(self_type), intent(inout) :: self,self_new
  type(hu_type), intent(inout) :: hu(paw_dmft%ntypat)
+ logical, intent(in), optional :: measure_g2
 !Local variables ------------------------------
+ logical :: do_measure_g2
+ integer :: g2_n_bosonic, g2_n_fermionic, g2_data_size_int
+ integer(C_LONG_LONG) :: g2_data_size
+ type(c_ptr) :: g2_data_ptr
+ complex(dp), target, allocatable :: g2_data_buf(:)
  integer :: basis,i,iatom,iblock,iflavor,iflavor1,iflavor2,ifreq,ilam,ileg,im,im1,integral,isppol,isub
  integer :: itau,itypat,iw,l,len_t,lpawu,myproc,natom,ncon,ndim,nflavor,nflavor_max,ngauss,nleg,nmoments
  integer :: nspinor,nsppol,nsub,ntau,ntot,nwlo,p,pad_elam,pad_lambda,read_data,rot_type_vee,tndim,unt,verbo,wdlr_size
@@ -3389,6 +3395,36 @@ subroutine ctqmc_calltriqs_c(paw_dmft,green,self,hu,weiss,self_new,pawprtvol)
  rot_inv        = (paw_dmft%dmft_solv == 7)
  shift_mu       = paw_dmft%dmft_triqs_shift_mu
  tol            = paw_dmft%dmft_triqs_tol_block
+
+ ! --- G2 measurement setup ---
+ do_measure_g2 = .false.
+ g2_n_bosonic = 0
+ g2_n_fermionic = 0
+ g2_data_size = 0
+ g2_data_size_int = 0
+ g2_data_ptr = C_NULL_PTR
+
+ if (present(measure_g2)) then
+   if (measure_g2) then
+     do_measure_g2 = .true.
+     g2_n_bosonic = paw_dmft%chi_imp_g2_nboson
+     g2_n_fermionic = paw_dmft%chi_imp_g2_niw
+     if (g2_n_bosonic > 0 .and. g2_n_fermionic > 0) then
+       ! Total size: nboson * niw^2 * norb^4
+       g2_data_size = int(g2_n_bosonic,C_LONG_LONG) * int(g2_n_fermionic,C_LONG_LONG) &
+         & * int(g2_n_fermionic,C_LONG_LONG) * int(nflavor_max,C_LONG_LONG)**4
+       g2_data_size_int = int(g2_data_size)
+       write(message,'(a,i4,a,i4,a,i12)') &
+       '  G2 measurement: nboson=', g2_n_bosonic, ' niw=', g2_n_fermionic, &
+       ' data_size=', g2_data_size_int
+       call wrtout(std_out,message,"COLL")
+     else
+       do_measure_g2 = .false.
+       write(message,'(a)') '  G2 measurement skipped: nboson or niw is zero.'
+       call wrtout(std_out,message,"COLL")
+     end if
+   end if
+ end if
 
  if (rot_inv) then
    write(message,'(a,3x,a)') ch10,"== Rotationally Invariant Terms Included"
@@ -3926,6 +3962,15 @@ subroutine ctqmc_calltriqs_c(paw_dmft,green,self,hu,weiss,self_new,pawprtvol)
 
      call flush_unit(std_out)
 
+     ! Allocate G2 buffer for this atom if measurement is requested
+     if (do_measure_g2 .and. g2_data_size_int > 0) then
+       ABI_MALLOC(g2_data_buf, (g2_data_size_int))
+       g2_data_buf = czero
+       g2_data_ptr = c_loc(g2_data_buf(1))
+     else
+       g2_data_ptr = C_NULL_PTR
+     end if
+
 #if defined HAVE_TRIQS_INTERNAL || defined HAVE_TRIQS_v3_2
      call Ctqmc_triqs_run(rot_inv,leg_measure,paw_dmft%dmft_triqs_move_shift,paw_dmft%dmft_triqs_move_double, &
                         & density_matrix,paw_dmft%dmft_triqs_time_invariance,paw_dmft%dmft_triqs_use_norm_as_weight, &
@@ -3937,8 +3982,21 @@ subroutine ctqmc_calltriqs_c(paw_dmft,green,self,hu,weiss,self_new,pawprtvol)
                         & beta,paw_dmft%dmft_triqs_imag_threshold,paw_dmft%dmft_triqs_det_precision_warning, &
                         & paw_dmft%dmft_triqs_det_precision_error,paw_dmft%dmft_triqs_det_singular_threshold,lam_list(ilam), &
                         & paw_dmft%dmft_triqs_pauli_prob,block_ptr,flavor_ptr,inner_ptr,siz_ptr,ftau_ptr,gtau_ptr,gl_ptr, &
-                        & udens_ptr,vee_ptr,levels_ptr,mself_1_ptr,mself_2_ptr,occ_ptr,eu_ptr,fname_data_ptr,fname_dataw_ptr, fname_histo_ptr)
+                        & udens_ptr,vee_ptr,levels_ptr,mself_1_ptr,mself_2_ptr,occ_ptr,eu_ptr,fname_data_ptr,fname_dataw_ptr, fname_histo_ptr, &
+                        & do_measure_g2,g2_n_bosonic,g2_n_fermionic,g2_data_ptr,g2_data_size_int)
 #endif
+
+     ! Store G2 data into paw_dmft if measurement was performed
+     if (do_measure_g2 .and. g2_data_size_int > 0) then
+       ABI_SFREE(paw_dmft%chi_imp_g2_data)
+       ABI_MALLOC(paw_dmft%chi_imp_g2_data, (g2_data_size_int))
+       paw_dmft%chi_imp_g2_data(:) = g2_data_buf(:)
+       paw_dmft%chi_imp_g2_norb = nflavor
+       paw_dmft%has_chi_imp_g2 = 1
+       ABI_FREE(g2_data_buf)
+       write(message,'(a,i4,a)') '  G2 data stored for atom ', iatom, '.'
+       call wrtout(std_out,message,"COLL")
+     end if
 
      call flush_unit(std_out)
 

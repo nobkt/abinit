@@ -657,6 +657,31 @@ MODULE m_paw_dmft
   ! These are used to compute the optical conductivity bubble
   ! Pi_mu_nu = -(1/beta*Nk) sum_{k,n} Tr[j_mu G j_nu G]
 
+  integer :: has_chi_imp_g2 = 0
+  ! = 0: chi_imp_g2_data not available
+  ! = 1: chi_imp_g2_data computed from TRIQS G2_iw_ph measurement
+
+  integer :: chi_imp_g2_nboson = 0
+  ! Number of bosonic Matsubara frequencies in G2 measurement
+
+  integer :: chi_imp_g2_niw = 0
+  ! Number of fermionic Matsubara frequencies in G2 measurement
+
+  integer :: chi_imp_g2_norb = 0
+  ! Number of flavors (= nspinor * (2*lpawu+1)) in G2 measurement
+
+  complex(dp), allocatable :: chi_imp_g2_data(:)
+  ! Flattened two-particle Green function G2_iw_ph from TRIQS CT-HYB.
+  ! Layout: g2_data(iOm, iw, iwp, alpha, beta, gamma, delta)
+  ! packed as: index = ((((iOm*niw + iw)*niw + iwp)*norb + a)*norb + b)*norb*norb + c*norb + d
+  ! with 0-based indices: iOm=0..nboson-1, iw=0..niw-1, iwp=0..niw-1,
+  !                       a,b,c,d=0..norb-1
+  ! Total size: nboson * niw^2 * norb^4
+  !
+  ! Sign convention: this stores the connected part G^(2)_connected.
+  ! The physical susceptibility chi = -G^(2)_connected
+  ! (the minus sign is applied during conversion to chi_loc_type).
+
   integer, ABI_CONTIGUOUS pointer :: dmft_nominal(:) => null()
   ! Only relevant when dmft_dc=7. Nominal occupancies for each atom.
 
@@ -2207,6 +2232,8 @@ subroutine destroy_dmft(paw_dmft)
  ABI_SFREE(paw_dmft%omega_r)
  ABI_SFREE(paw_dmft%symrec_cart)
  ABI_SFREE(paw_dmft%psinablapsi_dmft)
+ ABI_SFREE(paw_dmft%chi_imp_g2_data)
+ paw_dmft%has_chi_imp_g2 = 0
  paw_dmft%eigen => null()
  paw_dmft%fixed_self => null()
  paw_dmft%indsym => null()

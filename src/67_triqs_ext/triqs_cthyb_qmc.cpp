@@ -35,7 +35,9 @@ void ctqmc_triqs_run(bool rot_inv, bool leg_measure, bool move_shift, bool move_
                      int *flavor_list, int *inner_list, int *siz_list, complex<double> *ftau, complex<double> *gtau,
                      complex<double> *gl, complex<double> *udens_cmplx, complex<double> *vee_cmplx, complex<double> *levels_cmplx,
                      complex<double> *moments_self_1, complex<double> *moments_self_2, complex<double> *occ, complex<double> *eu,
-                     char *fname_data, char *fname_dataw, char *fname_histo) {
+                     char *fname_data, char *fname_dataw, char *fname_histo,
+                     bool measure_g2, int g2_n_bosonic, int g2_n_fermionic,
+                     complex<double> *g2_data, int g2_data_size) {
 
   string qmc_data_fname  = string(fname_data);
   string qmc_data_fnamew = string(fname_dataw);
@@ -226,6 +228,18 @@ void ctqmc_triqs_run(bool rot_inv, bool leg_measure, bool move_shift, bool move_
     paramCTQMC.measure_G_tau = false;
   }
 
+  // Two-particle Green function measurement (G2_iw_ph)
+  if (measure_g2 && g2_n_bosonic > 0 && g2_n_fermionic > 0) {
+    paramCTQMC.measure_G2_iw_ph = true;
+    paramCTQMC.measure_G2_n_bosonic = g2_n_bosonic;
+    paramCTQMC.measure_G2_n_fermionic = g2_n_fermionic;
+    if (rank == 0 && verbo == 1) {
+      cout << endl << "   == G2_iw_ph measurement enabled ==" << endl;
+      cout << "   G2 n_bosonic          = " << g2_n_bosonic << endl;
+      cout << "   G2 n_fermionic        = " << g2_n_fermionic << endl;
+    }
+  }
+
   if (rank == 0 && verbo == 1) {
 
     cout << endl << "   == Key Input Parameters for the TRIQS CTHYB solver ==" << endl << endl;
@@ -350,6 +364,83 @@ void ctqmc_triqs_run(bool rot_inv, bool leg_measure, bool move_shift, bool move_
             }
           }
   }
+
+  // Extract two-particle Green function G2_iw_ph if measured
+  if (measure_g2 && g2_data != nullptr && g2_data_size > 0) {
+
+    if (rank == 0 && verbo == 1)
+      cout << endl << "   == Extracting G2_iw_ph data ==" << endl;
+
+    // Zero out the output array
+    for (int i = 0; i < g2_data_size; i++) g2_data[i] = complex<double>(0.0, 0.0);
+
+    // G2_iw_ph is a Block2Gf: indexed by (block1, block2)
+    // For each block pair, data has mesh (boson, fermion, fermion)
+    // and target shape (n_orb_b1, n_orb_b1, n_orb_b2, n_orb_b2)
+    //
+    // We extract positive-frequency data only:
+    //   Bosonic: Omega_m for m = 0, 1, ..., g2_n_bosonic-1
+    //   Fermionic: omega_n for n = 0, 1, ..., g2_n_fermionic-1
+    //
+    // The TRIQS mesh has:
+    //   Bosonic: 2*g2_n_bosonic+1 points, index g2_n_bosonic is Omega=0
+    //   Fermionic: 2*g2_n_fermionic points, index g2_n_fermionic is omega_0
+    //
+    // Output is flattened as:
+    //   index = ((((iOm*niw + iw)*niw + iwp)*norb + f1)*norb + f2)*norb*norb + f3*norb + f4
+    //   where f1..f4 are global flavor indices (mapped from block indices via flavor_list)
+
+    auto& g2 = *solver.G2_iw_ph;
+    long long norb4 = (long long)num_orbitals * num_orbitals * num_orbitals * num_orbitals;
+
+    for (int ib1 = 0; ib1 < nblocks; ib1++) {
+      for (int ib2 = 0; ib2 < nblocks; ib2++) {
+
+        auto& g2_block = g2(ib1, ib2);
+        auto data = g2_block.data();
+        // data shape: (n_bos_total, n_fer_total, n_fer_total, siz_b1, siz_b1, siz_b2, siz_b2)
+
+        int bos_offset = g2_n_bosonic;   // mesh index of Omega=0
+        int fer_offset = g2_n_fermionic; // mesh index of omega_0
+
+        for (int iOm = 0; iOm < g2_n_bosonic; iOm++) {
+          for (int iw = 0; iw < g2_n_fermionic; iw++) {
+            for (int iwp = 0; iwp < g2_n_fermionic; iwp++) {
+
+              for (int o1 = 0; o1 < siz_list[ib1]; o1++) {
+                int f1 = flavor_list[o1 + ib1 * num_orbitals];
+                for (int o2 = 0; o2 < siz_list[ib1]; o2++) {
+                  int f2 = flavor_list[o2 + ib1 * num_orbitals];
+                  for (int o3 = 0; o3 < siz_list[ib2]; o3++) {
+                    int f3 = flavor_list[o3 + ib2 * num_orbitals];
+                    for (int o4 = 0; o4 < siz_list[ib2]; o4++) {
+                      int f4 = flavor_list[o4 + ib2 * num_orbitals];
+
+                      long long idx = ((((long long)iOm * g2_n_fermionic + iw) * g2_n_fermionic + iwp) * num_orbitals + f1)
+                                      * (long long)num_orbitals * num_orbitals * num_orbitals
+                                      + (long long)f2 * num_orbitals * num_orbitals
+                                      + (long long)f3 * num_orbitals + f4;
+
+                      if (idx >= 0 && idx < g2_data_size) {
+                        g2_data[idx] = data(bos_offset + iOm, fer_offset + iw, fer_offset + iwp, o1, o2, o3, o4);
+                      }
+
+                    } // o4
+                  } // o3
+                } // o2
+              } // o1
+
+            } // iwp
+          } // iw
+        } // iOm
+
+      } // ib2
+    } // ib1
+
+    if (rank == 0 && verbo == 1)
+      cout << "   == G2_iw_ph extraction complete. Data size: " << g2_data_size << " ==" << endl;
+
+  } // measure_g2
 
   auto h_loc_diag = solver.h_loc_diagonalization();
 

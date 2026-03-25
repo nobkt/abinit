@@ -203,19 +203,23 @@ end subroutine destroy_lattice_bse
 !! SOURCE
 
 subroutine compute_chi0_lattice(lbse, green_imp, paw_dmft, sproj, &
-  & norb_corr, niw_vertex, nboson)
+  & norb_corr, niw_vertex, nboson, ladd)
 
  type(lattice_bse_type), intent(inout) :: lbse
  type(green_type), intent(in) :: green_imp
  type(paw_dmft_type), intent(in) :: paw_dmft
  type(spinor_proj_type), intent(in) :: sproj
  integer, intent(in) :: norb_corr, niw_vertex, nboson
+ logical, intent(in), optional :: ladd
+   !! When .true., accumulate into chi0_latt instead of zeroing it first.
+   !! Default is .false. (zero and compute from scratch).
 
 !Local variables
  integer :: iom, iw, iw_shifted, ik, iw_max
  integer :: ialpha, ibeta, igamma, idelta
  integer :: norb_sq, idx_i, idx_j
  integer :: mbandc
+ logical :: ladd_local
  real(dp) :: beta, wk
  complex(dp), allocatable :: gloc_n(:,:), gloc_np(:,:)
  complex(dp), allocatable :: temp_mat(:,:), proj_k(:,:)
@@ -223,7 +227,10 @@ subroutine compute_chi0_lattice(lbse, green_imp, paw_dmft, sproj, &
 
 ! *********************************************************************
 
- write(msg,'(a)') ' compute_chi0_lattice: Computing lattice bubble at q=0'
+ ladd_local = .false.
+ if (present(ladd)) ladd_local = ladd
+
+ write(msg,'(a,l2)') ' compute_chi0_lattice: Computing lattice bubble at q=0, accumulate=', ladd_local
  call wrtout(std_out, msg)
 
  ! --- Validate KS data availability across all needed frequencies ---
@@ -231,18 +238,18 @@ subroutine compute_chi0_lattice(lbse, green_imp, paw_dmft, sproj, &
  if (green_imp%oper(1)%has_operks /= 1) then
    write(msg,'(3a)') &
    'compute_chi0_lattice: Green function does not have KS basis data.',ch10,&
-   'Cannot compute lattice bubble without G(k,iw). Leaving chi0_latt as zero.'
+   'Cannot compute lattice bubble without G(k,iw). Skipping this atom contribution.'
    ABI_WARNING(msg)
-   lbse%chi0_latt = czero
+   if (.not. ladd_local) lbse%chi0_latt = czero
    return
  end if
  ! Verify KS data exists for the highest frequency needed
  if (green_imp%oper(iw_max)%has_operks /= 1) then
    write(msg,'(a,i6,a)') &
    'compute_chi0_lattice: KS data not available at frequency index ', iw_max, &
-   '. Leaving chi0_latt as zero.'
+   '. Skipping this atom contribution.'
    ABI_WARNING(msg)
-   lbse%chi0_latt = czero
+   if (.not. ladd_local) lbse%chi0_latt = czero
    return
  end if
 
@@ -268,7 +275,9 @@ subroutine compute_chi0_lattice(lbse, green_imp, paw_dmft, sproj, &
  ABI_MALLOC(temp_mat, (norb_corr, mbandc))
  ABI_MALLOC(proj_k, (norb_corr, mbandc))
 
- lbse%chi0_latt = czero
+ if (.not. ladd_local) then
+   lbse%chi0_latt = czero
+ end if
 
  ! --- Compute lattice bubble ---
  ! chi0^latt_{(ab,n),(gd,n')}(iOm) = -beta * delta_{nn'} *

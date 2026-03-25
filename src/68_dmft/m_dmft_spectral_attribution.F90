@@ -56,6 +56,7 @@ MODULE m_dmft_spectral_attribution
  public :: destroy_spectral_attribution
  public :: compute_spectral_attribution
  public :: write_spectral_attribution
+ public :: write_attribution_comparison
 
 !!***
 
@@ -445,6 +446,180 @@ subroutine write_spectral_attribution(attrib, fname, beta)
  call wrtout(std_out, msg)
 
 end subroutine write_spectral_attribution
+
+!!***
+
+!!****f* m_dmft_spectral_attribution/write_attribution_comparison
+!! NAME
+!!  write_attribution_comparison
+!!
+!! FUNCTION
+!!  Write a cross-level comparison of spectral attributions to a single file.
+!!  Shows how the susceptibility decomposes at three levels:
+!!    1. Impurity bubble chi0_imp (local, per-site)
+!!    2. Lattice bubble chi0_latt (k-summed, no vertex correction)
+!!    3. BSE chi_full (k-summed, with vertex correction from Gamma_imp)
+!!
+!!  The comparison enables direct identification of:
+!!    - Effect of k-point dispersion: chi0_latt - chi0_imp
+!!    - Effect of vertex corrections: chi_full - chi0_latt
+!!
+!!  Output includes total susceptibility and all spin channels at each level.
+!!
+!! INPUTS
+!!  attrib_imp = attribution of total chi0_imp
+!!  attrib_latt = attribution of chi0_latt
+!!  attrib_bse = attribution of chi_full (BSE solution)
+!!  fname = output file name
+!!  beta = inverse temperature
+!!
+!! SOURCE
+
+subroutine write_attribution_comparison(attrib_imp, attrib_latt, attrib_bse, fname, beta)
+
+ type(spectral_attribution_type), intent(in) :: attrib_imp
+ type(spectral_attribution_type), intent(in) :: attrib_latt
+ type(spectral_attribution_type), intent(in) :: attrib_bse
+ character(len=*), intent(in) :: fname
+ real(dp), intent(in) :: beta
+
+!Local variables
+ integer :: unt, iom, im, imp, ios
+ real(dp) :: omega_boson
+ complex(dp) :: delta_disp, delta_vtx
+ character(len=500) :: msg
+
+! *********************************************************************
+
+ ! Validate that all attributions have the same dimensions
+ if (attrib_imp%nboson /= attrib_latt%nboson .or. &
+     attrib_imp%nboson /= attrib_bse%nboson) then
+   ABI_ERROR('write_attribution_comparison: nboson mismatch between attribution levels')
+ end if
+ if (attrib_imp%ndim_orb /= attrib_latt%ndim_orb .or. &
+     attrib_imp%ndim_orb /= attrib_bse%ndim_orb) then
+   ABI_ERROR('write_attribution_comparison: ndim_orb mismatch between attribution levels')
+ end if
+
+ open(newunit=unt, file=fname, form='formatted', action='write', iostat=ios)
+ if (ios /= 0) then
+   write(msg,'(3a)') 'Cannot open file: ', trim(fname), ' for writing.'
+   ABI_ERROR(msg)
+ end if
+
+ write(unt,'(a)') '# DFT+DMFT Cross-Level Attribution Comparison'
+ write(unt,'(a)') '# Compares spectral decomposition at three levels:'
+ write(unt,'(a)') '#   IMP  = impurity bubble chi0_imp (local, per-site sum)'
+ write(unt,'(a)') '#   LATT = lattice bubble chi0_latt (k-summed, no vertex)'
+ write(unt,'(a)') '#   BSE  = full chi from BSE (k-summed, with vertex)'
+ write(unt,'(a)') '# Delta_disp = LATT - IMP  (effect of k-point dispersion)'
+ write(unt,'(a)') '# Delta_vtx  = BSE - LATT  (effect of vertex corrections)'
+ write(unt,'(a,i6)') '# nboson = ', attrib_imp%nboson
+ write(unt,'(a,i4)') '# ndim_orb = ', attrib_imp%ndim_orb
+ write(unt,'(a,es14.6)') '# beta = ', beta
+ write(unt,'(a)')
+
+ ! --- Section 1: Total susceptibility comparison ---
+ write(unt,'(a)') '# === Section 1: Total susceptibility trace ==='
+ write(unt,'(a)') '# iOm  Omega_boson  Re(IMP)  Im(IMP)  Re(LATT)  Im(LATT)  ' // &
+   'Re(BSE)  Im(BSE)  Re(Delta_disp)  Im(Delta_disp)  Re(Delta_vtx)  Im(Delta_vtx)'
+
+ do iom = 1, attrib_imp%nboson
+   omega_boson = two_pi * dble(iom - 1) / beta
+   delta_disp = attrib_latt%chi_total(iom) - attrib_imp%chi_total(iom)
+   delta_vtx = attrib_bse%chi_total(iom) - attrib_latt%chi_total(iom)
+   write(unt,'(i6,es14.6,10es18.8)') iom, omega_boson, &
+     real(attrib_imp%chi_total(iom)), aimag(attrib_imp%chi_total(iom)), &
+     real(attrib_latt%chi_total(iom)), aimag(attrib_latt%chi_total(iom)), &
+     real(attrib_bse%chi_total(iom)), aimag(attrib_bse%chi_total(iom)), &
+     real(delta_disp), aimag(delta_disp), &
+     real(delta_vtx), aimag(delta_vtx)
+ end do
+
+ write(unt,'(a)')
+
+ ! --- Section 2: Spin-conserving channel comparison ---
+ write(unt,'(a)') '# === Section 2: Spin-conserving channel ==='
+ write(unt,'(a)') '# iOm  Omega_boson  Re(IMP)  Im(IMP)  Re(LATT)  Im(LATT)  ' // &
+   'Re(BSE)  Im(BSE)  Re(Delta_disp)  Im(Delta_disp)  Re(Delta_vtx)  Im(Delta_vtx)'
+
+ do iom = 1, attrib_imp%nboson
+   omega_boson = two_pi * dble(iom - 1) / beta
+   delta_disp = attrib_latt%chi_spin_conserving(iom) - attrib_imp%chi_spin_conserving(iom)
+   delta_vtx = attrib_bse%chi_spin_conserving(iom) - attrib_latt%chi_spin_conserving(iom)
+   write(unt,'(i6,es14.6,10es18.8)') iom, omega_boson, &
+     real(attrib_imp%chi_spin_conserving(iom)), aimag(attrib_imp%chi_spin_conserving(iom)), &
+     real(attrib_latt%chi_spin_conserving(iom)), aimag(attrib_latt%chi_spin_conserving(iom)), &
+     real(attrib_bse%chi_spin_conserving(iom)), aimag(attrib_bse%chi_spin_conserving(iom)), &
+     real(delta_disp), aimag(delta_disp), &
+     real(delta_vtx), aimag(delta_vtx)
+ end do
+
+ write(unt,'(a)')
+
+ ! --- Section 3: S+S- channel comparison ---
+ write(unt,'(a)') '# === Section 3: S+S- (spin-flip) channel ==='
+ write(unt,'(a)') '# iOm  Omega_boson  Re(IMP)  Im(IMP)  Re(LATT)  Im(LATT)  ' // &
+   'Re(BSE)  Im(BSE)  Re(Delta_disp)  Im(Delta_disp)  Re(Delta_vtx)  Im(Delta_vtx)'
+
+ do iom = 1, attrib_imp%nboson
+   omega_boson = two_pi * dble(iom - 1) / beta
+   delta_disp = attrib_latt%chi_spin_flip_pm(iom) - attrib_imp%chi_spin_flip_pm(iom)
+   delta_vtx = attrib_bse%chi_spin_flip_pm(iom) - attrib_latt%chi_spin_flip_pm(iom)
+   write(unt,'(i6,es14.6,10es18.8)') iom, omega_boson, &
+     real(attrib_imp%chi_spin_flip_pm(iom)), aimag(attrib_imp%chi_spin_flip_pm(iom)), &
+     real(attrib_latt%chi_spin_flip_pm(iom)), aimag(attrib_latt%chi_spin_flip_pm(iom)), &
+     real(attrib_bse%chi_spin_flip_pm(iom)), aimag(attrib_bse%chi_spin_flip_pm(iom)), &
+     real(delta_disp), aimag(delta_disp), &
+     real(delta_vtx), aimag(delta_vtx)
+ end do
+
+ write(unt,'(a)')
+
+ ! --- Section 4: S-S+ channel comparison ---
+ write(unt,'(a)') '# === Section 4: S-S+ (reverse spin-flip) channel ==='
+ write(unt,'(a)') '# iOm  Omega_boson  Re(IMP)  Im(IMP)  Re(LATT)  Im(LATT)  ' // &
+   'Re(BSE)  Im(BSE)  Re(Delta_disp)  Im(Delta_disp)  Re(Delta_vtx)  Im(Delta_vtx)'
+
+ do iom = 1, attrib_imp%nboson
+   omega_boson = two_pi * dble(iom - 1) / beta
+   delta_disp = attrib_latt%chi_spin_flip_mp(iom) - attrib_imp%chi_spin_flip_mp(iom)
+   delta_vtx = attrib_bse%chi_spin_flip_mp(iom) - attrib_latt%chi_spin_flip_mp(iom)
+   write(unt,'(i6,es14.6,10es18.8)') iom, omega_boson, &
+     real(attrib_imp%chi_spin_flip_mp(iom)), aimag(attrib_imp%chi_spin_flip_mp(iom)), &
+     real(attrib_latt%chi_spin_flip_mp(iom)), aimag(attrib_latt%chi_spin_flip_mp(iom)), &
+     real(attrib_bse%chi_spin_flip_mp(iom)), aimag(attrib_bse%chi_spin_flip_mp(iom)), &
+     real(delta_disp), aimag(delta_disp), &
+     real(delta_vtx), aimag(delta_vtx)
+ end do
+
+ write(unt,'(a)')
+
+ ! --- Section 5: Orbital-resolved S+S- comparison (dominant contributions) ---
+ write(unt,'(a)') '# === Section 5: Orbital-resolved S+S- comparison ==='
+ write(unt,'(a)') '# iOm  Omega_boson  m  m_prime  Re(IMP)  Im(IMP)  Re(LATT)  Im(LATT)  Re(BSE)  Im(BSE)'
+
+ do iom = 1, attrib_imp%nboson
+   omega_boson = two_pi * dble(iom - 1) / beta
+   do im = 1, attrib_imp%ndim_orb
+     do imp = 1, attrib_imp%ndim_orb
+       write(unt,'(i6,es14.6,2i4,6es18.8)') iom, omega_boson, im, imp, &
+         real(attrib_imp%chi_pm_orbital(iom, im, imp)), &
+         aimag(attrib_imp%chi_pm_orbital(iom, im, imp)), &
+         real(attrib_latt%chi_pm_orbital(iom, im, imp)), &
+         aimag(attrib_latt%chi_pm_orbital(iom, im, imp)), &
+         real(attrib_bse%chi_pm_orbital(iom, im, imp)), &
+         aimag(attrib_bse%chi_pm_orbital(iom, im, imp))
+     end do
+   end do
+ end do
+
+ close(unt)
+
+ write(msg,'(3a)') ' write_attribution_comparison: Written to ', trim(fname)
+ call wrtout(std_out, msg)
+
+end subroutine write_attribution_comparison
 
 !!***
 

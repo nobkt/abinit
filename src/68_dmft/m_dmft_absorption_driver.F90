@@ -49,7 +49,8 @@ MODULE m_dmft_absorption_driver
                                 & compute_bubble_conductivity, write_optic_kernel
  use m_dmft_spectral_attribution, only : spectral_attribution_type, &
    & init_spectral_attribution, destroy_spectral_attribution, &
-   & compute_spectral_attribution, write_spectral_attribution
+   & compute_spectral_attribution, write_spectral_attribution, &
+   & write_attribution_comparison
  use m_dmft_spinor_proj, only : spinor_proj_type, init_spinor_proj, destroy_spinor_proj, &
    & populate_from_chipsi, check_spinor_completeness
 
@@ -105,8 +106,13 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc, green_imp)
  type(optic_kernel_type) :: optic_kern
  type(spinor_proj_type) :: sproj
  type(spectral_attribution_type) :: attrib_tmp
+ type(spectral_attribution_type) :: attrib_imp
+ type(spectral_attribution_type) :: attrib_latt
+ type(spectral_attribution_type) :: attrib_bse
+ logical :: do_spinflip_attrib
  integer :: nboson, niw_vertex, norb_corr, resp_mode
- integer :: ndim_orb, iatom, ncorr_atoms
+ integer :: ndim_orb, iatom, ncorr_atoms, iatom_latt_count
+ integer :: ncorr_atoms_latt
  real(dp) :: beta
 
 ! *********************************************************************
@@ -146,16 +152,33 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc, green_imp)
  ndim_orb = 2 * paw_dmft%maxlpawu + 1
  norb_corr = paw_dmft%nspinor * ndim_orb
 
- ! Count correlated atoms
+ ! Count correlated atoms (total and those usable for lattice bubble)
  ncorr_atoms = 0
+ ncorr_atoms_latt = 0
  do iatom = 1, paw_dmft%natom
-   if (paw_dmft%lpawu(iatom) >= 0) ncorr_atoms = ncorr_atoms + 1
+   if (paw_dmft%lpawu(iatom) >= 0) then
+     ncorr_atoms = ncorr_atoms + 1
+     if (paw_dmft%lpawu(iatom) == paw_dmft%maxlpawu) then
+       ncorr_atoms_latt = ncorr_atoms_latt + 1
+     end if
+   end if
  end do
 
- write(msg,'(a,i4,a,i4,a,i4,a,es14.6,a,i4)') &
+ ! Determine if spin-flip attribution should be computed
+ do_spinflip_attrib = (dtset%dmft_resp_spinflip == 1 .and. paw_dmft%nspinor == 2)
+
+ write(msg,'(a,i4,a,i4,a,i4,a,es14.6,a,i4,a,i4)') &
  ' Response parameters: nboson=', nboson, ' niw_vertex=', niw_vertex, &
- ' norb_corr=', norb_corr, ' beta=', beta, ' ncorr_atoms=', ncorr_atoms
+ ' norb_corr=', norb_corr, ' beta=', beta, &
+ ' ncorr_atoms=', ncorr_atoms, ' ncorr_atoms_latt=', ncorr_atoms_latt
  call wrtout(std_out, msg)
+
+ if (ncorr_atoms_latt < ncorr_atoms) then
+   write(msg,'(a,i4,a,i4,a)') &
+   ' WARNING: ', ncorr_atoms - ncorr_atoms_latt, ' of ', ncorr_atoms, &
+   ' correlated atoms have lpawu /= maxlpawu and will be excluded from lattice bubble.'
+   call wrtout(std_out, msg)
+ end if
 
  ! =====================================================================
  ! Stage 1: Compute local impurity bubble chi0 for each correlated atom
@@ -183,7 +206,7 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc, green_imp)
    call write_chi_loc(chi0_atom, trim(fname))
 
    ! Stage 1b: Atom-resolved spectral attribution
-   if (dtset%dmft_resp_spinflip == 1 .and. paw_dmft%nspinor == 2) then
+   if (do_spinflip_attrib) then
      write(msg,'(a,i4)') '   Stage 1b: Spectral attribution for atom ', iatom
      call wrtout(std_out, msg)
 
@@ -203,15 +226,15 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc, green_imp)
  ! Write total chi0 diagnostics
  call write_chi_loc(chi0_loc, 'DMFT_chi0_imp_total.dat')
 
- ! Total spectral attribution (sum over atoms)
- if (dtset%dmft_resp_spinflip == 1 .and. paw_dmft%nspinor == 2) then
+ ! Total spectral attribution (sum over atoms) — kept alive for cross-level comparison
+ if (do_spinflip_attrib) then
    write(msg,'(a)') '   Stage 1b: Spectral attribution of total chi0_imp'
    call wrtout(std_out, msg)
 
-   call init_spectral_attribution(attrib_tmp, nboson, ndim_orb, paw_dmft%nspinor)
-   call compute_spectral_attribution(attrib_tmp, chi0_loc, paw_dmft%nspinor)
-   call write_spectral_attribution(attrib_tmp, 'DMFT_attrib_chi0_imp_total.dat', beta)
-   call destroy_spectral_attribution(attrib_tmp)
+   call init_spectral_attribution(attrib_imp, nboson, ndim_orb, paw_dmft%nspinor)
+   call compute_spectral_attribution(attrib_imp, chi0_loc, paw_dmft%nspinor)
+   call write_spectral_attribution(attrib_imp, 'DMFT_attrib_chi0_imp_total.dat', beta)
+   ! attrib_imp is kept alive for Stage 6 cross-level comparison
  end if
 
  ! =====================================================================
@@ -241,53 +264,101 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc, green_imp)
  call extract_vertex_irr(vertex_irr, chi_loc, chi0_loc, norb_corr, niw_vertex, nboson)
 
  ! =====================================================================
- ! Stage 4: Lattice BSE
+ ! Stage 4: Lattice BSE (multi-atom lattice bubble accumulation)
  ! =====================================================================
  write(msg,'(a)') ' Stage 4: Solving lattice Bethe-Salpeter equation'
  call wrtout(std_out, msg)
 
  call init_lattice_bse(latt_bse, norb_corr, niw_vertex, nboson, paw_dmft%nkpt)
-
- ! --- Populate spinor projectors from chipsi ---
- ! Use the first correlated atom for projection. For multi-atom systems,
- ! the lattice bubble includes contributions from all atoms through the
- ! self-energy embedded in G^KS(k,iw).
  call init_spinor_proj(sproj, paw_dmft)
 
- ! Find first correlated atom for populating projectors
+ ! --- Multi-atom lattice bubble: loop over all correlated atoms ---
+ ! Each atom contributes through its own spinor projectors P_atom(k).
+ ! The total lattice bubble is the sum of contributions from all atoms:
+ !   chi0^latt_total = sum_atom chi0^latt_atom
+ ! where each atom's contribution uses G^loc_atom(k,iw) = P_atom G^KS P_atom^dag.
+ !
+ ! Atoms with lpawu /= maxlpawu are skipped because the spinor projector
+ ! dimension (nspinor*(2*lpawu+1)) would not match norb_corr. This is a
+ ! structural constraint, not a heuristic: the composite index space is
+ ! defined by maxlpawu, and atoms with different lpawu have incompatible
+ ! orbital spaces that cannot be directly accumulated.
+
+ iatom_latt_count = 0
  do iatom = 1, paw_dmft%natom
-   if (paw_dmft%lpawu(iatom) >= 0) then
-     call populate_from_chipsi(sproj, paw_dmft, iatom)
-     call check_spinor_completeness(sproj, tol4)
-     exit
+   if (paw_dmft%lpawu(iatom) < 0) cycle
+   if (paw_dmft%lpawu(iatom) /= paw_dmft%maxlpawu) then
+     write(msg,'(a,i4,a,i2,a,i2,a)') &
+     '   Skipping atom ', iatom, ' for lattice bubble: lpawu=', paw_dmft%lpawu(iatom), &
+     ' /= maxlpawu=', paw_dmft%maxlpawu, ' (incompatible orbital dimension)'
+     call wrtout(std_out, msg)
+     cycle
    end if
+
+   iatom_latt_count = iatom_latt_count + 1
+
+   write(msg,'(a,i4,a,i2,a,i4,a,i4)') &
+   '   Computing lattice bubble for atom ', iatom, &
+   ' lpawu=', paw_dmft%lpawu(iatom), &
+   ' (', iatom_latt_count, ' of ', ncorr_atoms_latt, ')'
+   call wrtout(std_out, msg)
+
+   ! Populate spinor projectors for this atom
+   call populate_from_chipsi(sproj, paw_dmft, iatom)
+   call check_spinor_completeness(sproj, tol4)
+
+   ! Compute lattice bubble contribution from this atom
+   ! First atom: ladd=.false. (zeros chi0_latt then fills)
+   ! Subsequent atoms: ladd=.true. (accumulates into existing chi0_latt)
+   call compute_chi0_lattice(lbse=latt_bse, green_imp=green_imp, paw_dmft=paw_dmft, &
+     & sproj=sproj, norb_corr=norb_corr, niw_vertex=niw_vertex, nboson=nboson, &
+     & ladd=(iatom_latt_count > 1))
+
  end do
 
- ! --- Compute lattice bubble using G(k,iw) from green_imp ---
- call compute_chi0_lattice(lbse=latt_bse, green_imp=green_imp, paw_dmft=paw_dmft, &
-   & sproj=sproj, norb_corr=norb_corr, niw_vertex=niw_vertex, nboson=nboson)
+ if (iatom_latt_count == 0) then
+   write(msg,'(a)') &
+   ' WARNING: No atoms contributed to the lattice bubble (no correlated atoms with lpawu=maxlpawu).'
+   call wrtout(std_out, msg)
+ else
+   write(msg,'(a,i4,a)') &
+   ' Lattice bubble accumulated from ', iatom_latt_count, ' correlated atom(s).'
+   call wrtout(std_out, msg)
+ end if
 
  ! Write lattice bubble diagnostics (reuse chi_loc write format)
  call write_chi_mat_as_chi_loc(latt_bse%chi0_latt, norb_corr, niw_vertex, nboson, &
    & 'DMFT_chi0_lattice.dat')
 
- ! Stage 4b: Spectral attribution of lattice bubble
- if (dtset%dmft_resp_spinflip == 1 .and. paw_dmft%nspinor == 2) then
+ ! Stage 4b: Spectral attribution of total lattice bubble — kept alive for comparison
+ if (do_spinflip_attrib) then
    write(msg,'(a)') '   Stage 4b: Spectral attribution of lattice bubble chi0_latt'
    call wrtout(std_out, msg)
-   call attribute_chi_mat(latt_bse%chi0_latt, norb_corr, niw_vertex, nboson, &
-     & ndim_orb, paw_dmft%nspinor, beta, 'DMFT_attrib_chi0_lattice.dat')
+
+   call init_spectral_attribution(attrib_latt, nboson, ndim_orb, paw_dmft%nspinor)
+   call init_chi_loc(chi0_atom, norb_corr, niw_vertex, nboson)
+   chi0_atom%chi_mat(:,:,:) = latt_bse%chi0_latt(:,:,:)
+   call compute_spectral_attribution(attrib_latt, chi0_atom, paw_dmft%nspinor)
+   call destroy_chi_loc(chi0_atom)
+   call write_spectral_attribution(attrib_latt, 'DMFT_attrib_chi0_lattice.dat', beta)
+   ! attrib_latt is kept alive for Stage 6 cross-level comparison
  end if
 
  ! --- Solve BSE ---
  call solve_lattice_bse(latt_bse, vertex_irr, norb_corr, niw_vertex, nboson)
 
- ! Stage 4c: Spectral attribution of BSE-corrected chi
- if (dtset%dmft_resp_spinflip == 1 .and. paw_dmft%nspinor == 2) then
+ ! Stage 4c: Spectral attribution of BSE-corrected chi — kept alive for comparison
+ if (do_spinflip_attrib) then
    write(msg,'(a)') '   Stage 4c: Spectral attribution of BSE chi_full'
    call wrtout(std_out, msg)
-   call attribute_chi_mat(latt_bse%chi_full, norb_corr, niw_vertex, nboson, &
-     & ndim_orb, paw_dmft%nspinor, beta, 'DMFT_attrib_chi_full.dat')
+
+   call init_spectral_attribution(attrib_bse, nboson, ndim_orb, paw_dmft%nspinor)
+   call init_chi_loc(chi0_atom, norb_corr, niw_vertex, nboson)
+   chi0_atom%chi_mat(:,:,:) = latt_bse%chi_full(:,:,:)
+   call compute_spectral_attribution(attrib_bse, chi0_atom, paw_dmft%nspinor)
+   call destroy_chi_loc(chi0_atom)
+   call write_spectral_attribution(attrib_bse, 'DMFT_attrib_chi_full.dat', beta)
+   ! attrib_bse is kept alive for Stage 6 cross-level comparison
  end if
 
  ! =====================================================================
@@ -310,8 +381,29 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc, green_imp)
  end if
 
  ! =====================================================================
+ ! Stage 6: Cross-level attribution comparison
+ ! =====================================================================
+ ! Compare attributions across three levels: chi0_imp → chi0_latt → chi_full
+ ! to quantify the effects of k-point dispersion and vertex corrections.
+ if (do_spinflip_attrib) then
+   write(msg,'(a)') ' Stage 6: Cross-level attribution comparison'
+   call wrtout(std_out, msg)
+
+   call write_attribution_comparison(attrib_imp, attrib_latt, attrib_bse, &
+     & 'DMFT_attrib_comparison.dat', beta)
+
+   write(msg,'(a)') ' Cross-level comparison written to DMFT_attrib_comparison.dat'
+   call wrtout(std_out, msg)
+ end if
+
+ ! =====================================================================
  ! Cleanup
  ! =====================================================================
+ if (do_spinflip_attrib) then
+   call destroy_spectral_attribution(attrib_imp)
+   call destroy_spectral_attribution(attrib_latt)
+   call destroy_spectral_attribution(attrib_bse)
+ end if
  call destroy_spinor_proj(sproj)
  call destroy_lattice_bse(latt_bse)
  call destroy_vertex_irr(vertex_irr)

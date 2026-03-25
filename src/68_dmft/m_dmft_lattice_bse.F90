@@ -245,6 +245,13 @@ end subroutine destroy_lattice_bse
 !!  The k-point weights paw_dmft%wtk(ik) are used for the averaging,
 !!  satisfying sum_k wtk(ik) = 1.
 !!
+!!  When kpt_attrib is present and nspinor=2, per-k spin-channel trace
+!!  decomposition is computed on-the-fly during the k-point loop.
+!!  The spin index convention is: indices 1..ndim_orb are spin-up,
+!!  indices ndim_orb+1..2*ndim_orb are spin-down, where ndim_orb=norb_corr/nspinor.
+!!  This matches the convention in m_dmft_spectral_attribution.
+!!  If nspinor/=2, kpt_attrib is ignored (spin-channel decomposition is undefined).
+!!
 !! SOURCE
 
 subroutine compute_chi0_lattice(lbse, green_imp, paw_dmft, sproj, &
@@ -411,7 +418,10 @@ subroutine compute_chi0_lattice(lbse, green_imp, paw_dmft, sproj, &
               kpt_attrib%chi0_k_total(iom, ik) = &
                 kpt_attrib%chi0_k_total(iom, ik) + bubble_contrib
 
-              ! Determine spin indices
+              ! Determine spin indices from composite spinor-orbital index.
+              ! Convention: alpha=1..ndim_orb -> spin up (ispin=1)
+              !             alpha=ndim_orb+1..2*ndim_orb -> spin down (ispin=2)
+              ! This matches m_dmft_spectral_attribution (compute_spectral_attribution).
               if (ialpha <= ndim_orb) then
                 ispin_a = 1
               else

@@ -668,17 +668,13 @@ subroutine write_attribution_summary(attrib, fname, beta)
  real(dp), intent(in) :: beta
 
 !Local variables
- integer :: unt, ios, im, imp, nboson, ndim_orb
- integer :: irank, npairs, ii, jj
- integer :: tmp_m, tmp_mp
+ integer :: unt, ios, nboson, ndim_orb, npairs
  real(dp) :: omega_last
  real(dp) :: abs_total_0, abs_pm_0, abs_mp_0, abs_sc_0
  real(dp) :: abs_total_last, abs_pm_last, abs_mp_last, abs_sc_last
- real(dp) :: ratio_conv, tmp_val
+ real(dp) :: ratio_conv
  complex(dp) :: chi_static_total, chi_static_pm, chi_static_mp, chi_static_sc
  character(len=500) :: msg
- integer, allocatable :: rank_m(:), rank_mp(:)
- real(dp), allocatable :: rank_val(:)
 
 ! *********************************************************************
 
@@ -827,6 +823,41 @@ subroutine write_attribution_summary(attrib, fname, beta)
  write(unt,'(a)') '# Rank   m   m_prime   |chi_pm|        Re(chi_pm)         Im(chi_pm)'
 
  npairs = ndim_orb * ndim_orb
+ call write_orbital_ranking(unt, attrib%chi_pm_orbital(1,:,:), ndim_orb, npairs)
+
+ write(unt,'(a)')
+
+ ! --- Section 5: Dominant orbital pairs in S-S+ channel at static limit ---
+ write(unt,'(a)') '# ================================================================='
+ write(unt,'(a)') '# Section 5: Dominant orbital pairs in S-S+ at iOm=0'
+ write(unt,'(a)') '# ================================================================='
+ write(unt,'(a)') '# Rank   m   m_prime   |chi_mp|        Re(chi_mp)         Im(chi_mp)'
+
+ call write_orbital_ranking(unt, attrib%chi_mp_orbital(1,:,:), ndim_orb, npairs)
+
+ close(unt)
+
+ write(msg,'(3a)') ' write_attribution_summary: Written to ', trim(fname)
+ call wrtout(std_out, msg)
+
+end subroutine write_attribution_summary
+
+!!***
+
+! Private helper: write orbital pair ranking sorted by magnitude
+subroutine write_orbital_ranking(unt, chi_orbital, ndim_orb, npairs)
+
+ integer, intent(in) :: unt, ndim_orb, npairs
+ complex(dp), intent(in) :: chi_orbital(ndim_orb, ndim_orb)
+
+!Local variables
+ integer :: im, imp, irank, ii, jj, tmp_m, tmp_mp
+ real(dp) :: tmp_val
+ integer, allocatable :: rank_m(:), rank_mp(:)
+ real(dp), allocatable :: rank_val(:)
+
+! *********************************************************************
+
  ABI_MALLOC(rank_m, (npairs))
  ABI_MALLOC(rank_mp, (npairs))
  ABI_MALLOC(rank_val, (npairs))
@@ -837,7 +868,7 @@ subroutine write_attribution_summary(attrib, fname, beta)
      irank = irank + 1
      rank_m(irank) = im
      rank_mp(irank) = imp
-     rank_val(irank) = abs(attrib%chi_pm_orbital(1, im, imp))
+     rank_val(irank) = abs(chi_orbital(im, imp))
    end do
  end do
 
@@ -855,63 +886,15 @@ subroutine write_attribution_summary(attrib, fname, beta)
  do irank = 1, npairs
    write(unt,'(i6,2i6,es16.6,2es20.10)') irank, rank_m(irank), rank_mp(irank), &
      rank_val(irank), &
-     real(attrib%chi_pm_orbital(1, rank_m(irank), rank_mp(irank))), &
-     aimag(attrib%chi_pm_orbital(1, rank_m(irank), rank_mp(irank)))
+     real(chi_orbital(rank_m(irank), rank_mp(irank))), &
+     aimag(chi_orbital(rank_m(irank), rank_mp(irank)))
  end do
 
  ABI_FREE(rank_m)
  ABI_FREE(rank_mp)
  ABI_FREE(rank_val)
 
- write(unt,'(a)')
-
- ! --- Section 5: Dominant orbital pairs in S-S+ channel at static limit ---
- write(unt,'(a)') '# ================================================================='
- write(unt,'(a)') '# Section 5: Dominant orbital pairs in S-S+ at iOm=0'
- write(unt,'(a)') '# ================================================================='
- write(unt,'(a)') '# Rank   m   m_prime   |chi_mp|        Re(chi_mp)         Im(chi_mp)'
-
- ABI_MALLOC(rank_m, (npairs))
- ABI_MALLOC(rank_mp, (npairs))
- ABI_MALLOC(rank_val, (npairs))
-
- irank = 0
- do im = 1, ndim_orb
-   do imp = 1, ndim_orb
-     irank = irank + 1
-     rank_m(irank) = im
-     rank_mp(irank) = imp
-     rank_val(irank) = abs(attrib%chi_mp_orbital(1, im, imp))
-   end do
- end do
-
- do ii = 1, npairs - 1
-   do jj = ii + 1, npairs
-     if (rank_val(jj) > rank_val(ii)) then
-       tmp_val = rank_val(ii); rank_val(ii) = rank_val(jj); rank_val(jj) = tmp_val
-       tmp_m = rank_m(ii); rank_m(ii) = rank_m(jj); rank_m(jj) = tmp_m
-       tmp_mp = rank_mp(ii); rank_mp(ii) = rank_mp(jj); rank_mp(jj) = tmp_mp
-     end if
-   end do
- end do
-
- do irank = 1, npairs
-   write(unt,'(i6,2i6,es16.6,2es20.10)') irank, rank_m(irank), rank_mp(irank), &
-     rank_val(irank), &
-     real(attrib%chi_mp_orbital(1, rank_m(irank), rank_mp(irank))), &
-     aimag(attrib%chi_mp_orbital(1, rank_m(irank), rank_mp(irank)))
- end do
-
- ABI_FREE(rank_m)
- ABI_FREE(rank_mp)
- ABI_FREE(rank_val)
-
- close(unt)
-
- write(msg,'(3a)') ' write_attribution_summary: Written to ', trim(fname)
- call wrtout(std_out, msg)
-
-end subroutine write_attribution_summary
+end subroutine write_orbital_ranking
 
 !!***
 

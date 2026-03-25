@@ -6,10 +6,10 @@
 
 最初に重要な事実を明示する。
 
-1. `/home/runner/work/abinit/abinit/doc/topics/_DMFT.md` には、ABINIT 内部の連続時間量子モンテカルロソルバーが **density-density 相互作用**を前提とし、さらにハイブリダイゼーション関数が**軌道指標で対角**であることを仮定していることが書かれている。
-2. `/home/runner/work/abinit/abinit/doc/tutorial/dmft_triqs.md` と `/home/runner/work/abinit/abinit/src/65_paw/m_paw_dmft.F90` から、TRIQS/CT-HYB を用いる `dmft_solv = 7` では**回転不変な Slater 相互作用**が扱えることが確認できる。
-3. `/home/runner/work/abinit/abinit/src/79_seqpar_mpi/m_tddft.F90` には、既存の TDDFT/Casida 経路について **`spin flip is not possible actually`** と明記されている。
-4. `/home/runner/work/abinit/abinit/doc/theory/noncollinear.md` から、ABINIT にはスピノル密度行列と非共線磁性の理論基盤がある。
+1. `doc/topics/_DMFT.md` には、ABINIT 内部の連続時間量子モンテカルロソルバーが **density-density 相互作用**を前提とし、さらにハイブリダイゼーション関数が**軌道指標で対角**であることを仮定していることが書かれている。
+2. `doc/tutorial/dmft_triqs.md` と `src/65_paw/m_paw_dmft.F90` から、TRIQS/CT-HYB を用いる `dmft_solv = 7` では**回転不変な Slater 相互作用**が扱えることが確認できる。
+3. `src/79_seqpar_mpi/m_tddft.F90` には、既存の TDDFT/Casida 経路について **`spin flip is not possible actually`** と明記されている。
+4. `doc/theory/noncollinear.md` から、ABINIT にはスピノル密度行列と非共線磁性の理論基盤がある。
 
 したがって、**現在の実装だけでは「MnF₂ 型のスピン反転が重要な吸収スペクトル」を正しく計算することはできない**。  
 必要なのは、単なる一粒子自己エネルギーの追加ではなく、
@@ -118,7 +118,17 @@ MnF₂ 型の吸収でスピン反転が重要になるなら、少なくとも�
 
 を有効化した DFT+DMFT を要求する。
 
-### 2.3 回転不変局所相互作用
+### 2.3 温度・エネルギースケール
+
+MnF₂ の Néel 温度は \(T_N \approx 67\,\text{K}\) である。反強磁性秩序相でのスピン反転励起を捉えるには、\(T < T_N\) での計算が必要になる。
+
+DMFT の Matsubara 形式では温度 \(\beta = 1/k_BT\) が明示的に現れるため、以下の点に注意が必要である。
+
+1. **Matsubara 周波数グリッドの密度**: 低温ほど \(\omega_n = (2n+1)\pi/\beta\) の間隔が狭くなり、必要な Matsubara 周波数の数が増大する。\(T = 50\,\text{K}\) では \(\beta \approx 230\,\text{eV}^{-1}\) であり、数 eV の帯域をカバーするには \(N_\omega \sim \mathcal{O}(10^2\text{--}10^3)\) が必要になる。
+2. **二粒子量のコスト**: 二粒子頂点はフェルミ Matsubara 周波数 2 つとボソン周波数 1 つに依存するため、低温での周波数数の増大は計算コストを \(\mathcal{O}(N_\omega^2)\) で増加させる。
+3. **CT-HYB の符号問題**: スピン反転相互作用を含む回転不変ハミルトニアンと低温の組み合わせは、CT-HYB の平均符号を悪化させる可能性がある。これは物理的制約であり、ソルバーの設計で回避することはできない。
+
+### 2.4 回転不変局所相互作用
 
 スピン反転励起を扱うのに、密度密度近似
 
@@ -149,7 +159,26 @@ U_{m_1 m_2 m_3 m_4}
 
 である。
 
+> **Slater パラメータの補足**: 上式の \(U_{m_1 m_2 m_3 m_4}\) は Slater 積分 \(F^0, F^2, F^4\)（d 電子の場合）から構成される。ABINIT では `src/68_dmft/m_hu.F90` がこの 4 添字テンソル（`vee` 配列）の構築を担当し、`src/67_triqs_ext/triqs_cthyb_qmc.cpp` が TRIQS のハミルトニアンに渡す。通常の入力では、Hubbard \(U\) と Hund 結合 \(J\) から Slater パラメータへの変換が内部で行われる。
+
 従って、基底状態の不純物ソルバーとしては **`dmft_solv = 7` の TRIQS/CT-HYB 経路を最低条件**とする。
+
+> **ソルバー全体像の補足**: ABINIT が現在サポートする不純物ソルバー（`dmft_solv`）の全体像を整理する。
+>
+> | `dmft_solv` | ソルバー | 相互作用 | スピノル対応 |
+> | --- | --- | --- | --- |
+> | `-1` | 静的（再規格化なし、DFT+U 相当） | — | — |
+> | `0` | 静的（U=J=0 チェック用） | — | — |
+> | `1` | 平均場（DFT+U 相当） | — | — |
+> | `2` | Hubbard I | Slater | 非対応 |
+> | `4` | Hirsch-Fye | density-density | 非対応 |
+> | `5` | ABINIT 内部 CT-QMC | density-density | 非対応 |
+> | `6` | TRIQS/CT-HYB | density-density | 対応 |
+> | `7` | TRIQS/CT-HYB | **回転不変 Slater** | 対応 |
+> | `8` | ABINIT 内部 CT-QMC（オフ対角対応） | density-density | **対応** |
+> | `9` | TRIQS/CT-HYB（Python 起動） | 回転不変可 | **対応** |
+>
+> 本件でスピン反転相互作用を正しく扱うには `dmft_solv = 7` が必須だが、`dmft_solv = 8` がスピノル（`nspinor=2`）とオフ対角ハイブリダイゼーションに対応している点は、基底状態の安定化テストに利用できる可能性がある。また `dmft_solv = 9` は Python スクリプト経由で TRIQS を呼び出す経路であり、二粒子測定の追加実装において柔軟性が高い。
 
 ---
 
@@ -161,12 +190,15 @@ U_{m_1 m_2 m_3 m_4}
 2. **TRIQS/CT-HYB のインターフェース**
 3. **回転不変相互作用を使う `dmft_solv = 7`**
 4. **非共線磁性の理論基盤**
-5. **オフ対角ハイブリダイゼーションを扱うコード経路**
+5. **オフ対角ハイブリダイゼーションを扱うコード経路**（`dmft_solv = 6, 7, 8, 9` で有効）
+6. **GW+BSE 実装**（`src/71_bse/`）— 格子 Bethe-Salpeter 方程式の行列構築・対角化・スペクトル計算の基盤がすでに存在する。ただし、これは GW 自己エネルギーと RPA 型の励起子カーネルを前提としており、DMFT の局所既約頂点を入力とする設計にはなっていない。
+7. **optic ポスト処理ツール**（`doc/guide/optic.md`）— 独立粒子近似（IPA）での線形光学応答（誘電関数、光学伝導度）を波動関数の運動量行列要素から計算する。ただし、DMFT 自己エネルギーとの連携機能はなく、局所場効果や励起子効果も含まない。
+8. **`dmft_solv = 8`（スピノル対応内部 CT-QMC）および `dmft_solv = 9`（Python 経由 TRIQS）** — `nspinor=2` でのオフ対角密度行列・Green 関数の扱いに対応。
 
 ### 3.2 現在ないもの
 
-1. DMFT の**二粒子局所頂点**を測定し、ABINIT 側に返す正式経路
-2. スピン指標付きの**格子 Bethe-Salpeter 方程式**
+1. DMFT の**二粒子局所頂点**を測定し、ABINIT 側に返す正式経路。ただし、TRIQS/CT-HYB ソルバー自体は二粒子 Green 関数の測定機能を標準で備えている（`measure_G2_iw_ph` 等）。不足しているのは **ABINIT—TRIQS インターフェース**（`src/67_triqs_ext/triqs_cthyb_qmc.cpp`）がこの測定結果を受け取る口を持っていない点である。
+2. スピン指標付きの**格子 Bethe-Salpeter 方程式**。既存の GW+BSE（`src/71_bse/`）は、BSE 行列の構築・対角化・スペクトル計算のインフラを持つが、DMFT の局所既約頂点を励起子カーネルとして埋め込む設計にはなっていない。行列演算や k 点総和の低レベルルーチンの一部は再利用の可能性があるが、ドライバ層は新規に必要である。
 3. DMFT 自己エネルギーと局所頂点を使う**吸収スペクトル専用ドライバ**
 4. **非ヒューリスティックな実周波数応答**を出す公式経路
 5. TDDFT/Casida を越えて、スピン反転光学応答を扱う統一実装
@@ -187,7 +219,7 @@ U_{m_1 m_2 m_3 m_4}
 
 ## 4. 実装全体像
 
-## 4.1 全体フローチャート
+### 4.1 全体フローチャート
 
 ```mermaid
 flowchart TD
@@ -362,6 +394,15 @@ P_{\beta, b\sigma'}(\mathbf{k})
 
 である。
 
+> **Double counting 補正の選択について**: ABINIT は複数の double counting スキームを実装している：
+> - `dmft_dc=1`: FLL（Fully Localized Limit）
+> - `dmft_dc=2`: AMF（Around Mean Field）
+> - `dmft_dc=4,5`: FLL 非対角拡張
+> - `dmft_dc=6`: AMF 非対角拡張
+> - `dmft_dc=8`: 厳密 double counting（`dmft_solv=6,7` で利用可能、`src/65_paw/m_paw_exactDC.F90`）
+>
+> 本件のスピン反転吸収計算では、\(V^{\text{DC}}\) の選択が二粒子応答関数にも間接的に影響する（基底状態の占有数と Green 関数を通じて）。スピノル計算に対しては非対角拡張（`dmft_dc ≥ 4`）が望ましい。`dmft_solv = 7` との組み合わせでは `dmft_dc = 8`（厳密 DC）が利用可能であり、これを推奨候補とする。
+
 ### 5.4 局所 Green 関数
 
 \[
@@ -449,35 +490,57 @@ G^{\text{loc}}_{\alpha\beta}(i\omega_n)
 (i\omega_n, i\omega_{n'}; i\Omega_m)
 \]
 
-とし、
+とし、標準的な 3 時間積分の Fourier 規約（\(\tau_4=0\) を固定、Rohringer et al. Rev. Mod. Phys. 90, 025003 (2018) に準拠）を採用して
 
 \[
 \begin{aligned}
 \chi_{\alpha\beta\gamma\delta}^{\text{imp}}
 (i\omega_n, i\omega_{n'}; i\Omega_m)
 =\,
-&\int_{0}^{\beta} d\tau_1
+&-
+\int_{0}^{\beta} d\tau_1
 \int_{0}^{\beta} d\tau_2
-\int_{0}^{\beta} d\tau_3
-\int_{0}^{\beta} d\tau_4 \\
+\int_{0}^{\beta} d\tau_3 \\
 &\times
-e^{i\omega_n(\tau_1-\tau_2)}
-e^{i\omega_{n'}(\tau_3-\tau_4)}
-e^{i\Omega_m(\tau_2-\tau_3)} \\
+e^{-i\omega_n \tau_1}
+\,
+e^{i(\omega_n+\Omega_m)\tau_2}
+\,
+e^{-i(\omega_{n'}+\Omega_m)\tau_3} \\
 &\times
+\left[
 \left\langle
 T_{\tau}
 c_{\alpha}^{\dagger}(\tau_1)
 c_{\beta}(\tau_2)
 c_{\gamma}^{\dagger}(\tau_3)
-c_{\delta}(\tau_4)
-\right\rangle_{\text{conn}}
+c_{\delta}(0)
+\right\rangle
+-
+\left\langle
+T_{\tau}
+c_{\alpha}^{\dagger}(\tau_1)
+c_{\beta}(\tau_2)
+\right\rangle
+\left\langle
+T_{\tau}
+c_{\gamma}^{\dagger}(\tau_3)
+c_{\delta}(0)
+\right\rangle
+\right]
 \end{aligned}
 \]
 
 と定義する。
 
-ここで \(\langle \cdots \rangle_{\text{conn}}\) は連結部分だけを取ることを意味する。
+ここで
+
+- \(\tau_4 = 0\) に固定する標準的な粒子正孔規約を採用している。
+- 全体の負号は、物理的感受率が正定値になる規約に対応する。
+- 第二項は Hartree 型の非連結部分を差し引く。
+- この Fourier 規約のもとで、裸の bubble（セクション 5.9）と既約頂点（セクション 5.10）の定義が整合する。
+
+> **注意**: 元の設計書では 4 時間積分 \(\int d\tau_1 d\tau_2 d\tau_3 d\tau_4\) と Fourier 因子 \(e^{i\omega_n(\tau_1-\tau_2)} e^{i\omega_{n'}(\tau_3-\tau_4)} e^{i\Omega_m(\tau_2-\tau_3)}\) を用いていたが、この規約は上記の bubble 公式 \(\chi_0 = -\beta\delta_{nn'} G G\) と整合しない（4 積分規約では \(\beta^2\) 因子と異なる周波数引数が出現する）。ここでは文献標準に合わせて修正した。
 
 ### 5.8 スピン反転チャネル
 
@@ -511,7 +574,7 @@ S^{-}_{m_3 m_4}(0)
 
 ### 5.9 裸の局所二粒子関数
 
-局所 bubble は
+セクション 5.7 の Fourier 規約に対応する局所 bubble は
 
 \[
 \chi_{0,\alpha\beta\gamma\delta}^{\text{imp}}
@@ -521,12 +584,14 @@ S^{-}_{m_3 m_4}(0)
 \,
 \delta_{n n'}
 \,
-G_{\beta\gamma}^{\text{imp}}(i\omega_n)
+G_{\delta\alpha}^{\text{imp}}(i\omega_n)
 \,
-G_{\delta\alpha}^{\text{imp}}(i\omega_n + i\Omega_m)
+G_{\beta\gamma}^{\text{imp}}(i\omega_n + i\Omega_m)
 \]
 
 で与える。
+
+> **導出**: セクション 5.7 の定義において、非相互作用極限で Wick の定理を適用すると、Fock 型の収縮 \(\langle T c_{\alpha}^{\dagger}(\tau_1) c_{\delta}(0) \rangle \langle T c_{\beta}(\tau_2) c_{\gamma}^{\dagger}(\tau_3) \rangle\) から上式が得られる。\(G_{\delta\alpha}\) が裸の周波数 \(i\omega_n\) を持ち、\(G_{\beta\gamma}\) がシフトされた周波数 \(i\omega_n + i\Omega_m\) を持つ。元の設計書ではこの二つの Green 関数の周波数割り当てが逆になっていたが、上記の Fourier 規約と整合するよう修正した。
 
 ### 5.10 局所既約頂点
 
@@ -575,11 +640,11 @@ J \equiv (\gamma,\delta,n')
 =
 -\frac{1}{N_{\mathbf{k}}}
 \sum_{\mathbf{k}}
-G_{\beta\gamma}(\mathbf{k}, i\omega_n)
-G_{\delta\alpha}(\mathbf{k}+\mathbf{q}, i\omega_n + i\Omega_m)
+G_{\delta\alpha}(\mathbf{k}, i\omega_n)
+G_{\beta\gamma}(\mathbf{k}+\mathbf{q}, i\omega_n + i\Omega_m)
 \]
 
-で定義する。
+で定義する。不純物 bubble（セクション 5.9）と同一の添字・周波数規約に従う。
 
 光吸収では \(\mathbf{q}\rightarrow 0\) 極限を取る。
 
@@ -642,6 +707,12 @@ j_{\mu; a\uparrow,b\downarrow}(\mathbf{k})
 
 のようなスピン混合成分を保持する。
 
+> **PAW 形式での注意**: ABINIT は PAW（Projector Augmented Wave）法を用いているため、速度行列要素は単純な \(\partial H^{\text{KS}}/\partial k_\mu\) だけでなく、PAW 補正項を含む必要がある。具体的には、非局所ポテンシャルの交換子項
+> \[
+> j_{\mu}^{\text{PAW}} = j_{\mu}^{\text{local}} + \frac{i}{\hbar}[\hat{V}_{\text{NL}}, \hat{r}_\mu]
+> \]
+> を含めなければならない。ABINIT の既存 optic ツール（`src/65_paw/m_paw_optics.F90`）がこの PAW 補正の実装を持っているため、速度行列要素の計算についてはこのインフラの再利用を検討すべきである。
+
 ### 5.14 電流-電流相関関数
 
 Matsubara 表示の電流-電流相関関数は
@@ -672,6 +743,86 @@ T_{\tau}
 
 となる。
 
+具体的には、bubble 部分は
+
+\[
+\Pi_{\mu\nu}^{\text{bubble}}(i\Omega_m)
+=
+-\frac{1}{\beta N_{\mathbf{k}}}
+\sum_{\mathbf{k}}
+\sum_{n}
+\text{Tr}\left[
+j_{\mu}(\mathbf{k})
+\,
+G(\mathbf{k}, i\omega_n)
+\,
+j_{\nu}(\mathbf{k})
+\,
+G(\mathbf{k}, i\omega_n + i\Omega_m)
+\right]
+\]
+
+で与えられる。ここで Tr は軌道・スピン添字の和を表す。
+
+頂点補正部分は、DMFT 近似のもとで局所既約頂点 \(\Gamma^{\text{imp}}\) を用いて構成される。
+複合添字 \(I = (\alpha,\beta,n)\), \(J = (\gamma,\delta,n')\) を用いた行列表記で、dressed current vertex \(\tilde{j}_{\nu}\) は次の線形方程式を満たす：
+
+\[
+\tilde{j}_{\nu;I}(\mathbf{k}; i\Omega_m)
+=
+j_{\nu;(\alpha\beta)}(\mathbf{k})
++
+\sum_{J}
+\Gamma^{\text{imp}}_{IJ}(i\Omega_m)
+\,
+\bar{\chi}^{0}_{J}(i\Omega_m)
+\,
+\bar{\tilde{j}}_{\nu;J}(i\Omega_m)
+\]
+
+ここで
+
+\[
+\bar{\chi}^{0}_{J}(i\Omega_m)
+\equiv
+\frac{1}{N_{\mathbf{k}}}
+\sum_{\mathbf{k}'}
+\chi^{0,\text{diag}}_{(\gamma\delta n')}(\mathbf{k}'; i\Omega_m)
+\]
+
+は格子 bubble の k 平均対角ブロック（セクション 5.11 と同じ添字規約）であり、\(\bar{\tilde{j}}\) は k 平均 dressed vertex である。この方程式は複合添字空間の行列方程式として解く：
+
+\[
+\bar{\tilde{j}}_{\nu}(i\Omega_m)
+=
+\left[
+\mathbf{1} - \Gamma^{\text{imp}}(i\Omega_m) \, \bar{\chi}^{0}(i\Omega_m)
+\right]^{-1}
+\bar{j}_{\nu}
+\]
+
+全光学応答は
+
+\[
+\Pi_{\mu\nu}(i\Omega_m)
+=
+-\frac{1}{\beta N_{\mathbf{k}}}
+\sum_{\mathbf{k}}
+\sum_{n}
+\sum_{\alpha\beta\gamma\delta}
+j_{\mu;\alpha\beta}(\mathbf{k})
+\,
+G_{\delta\alpha}(\mathbf{k}, i\omega_n)
+\,
+G_{\beta\gamma}(\mathbf{k}, i\omega_n + i\Omega_m)
+\,
+\tilde{j}_{\nu;\gamma\delta}(\mathbf{k}, i\omega_n; i\Omega_m)
+\]
+
+で得る。添字の収縮構造は格子 bubble（セクション 5.11）と整合する。この dressed vertex の行列方程式が格子 BSE（セクション 5.12）と整合することが、実装の自己無撞着性検証の要点となる。
+
+> **注意**: 元の設計書では \(\Pi = \Pi^{\text{bubble}} + \Pi^{\text{vertex}}\) と書くだけで、具体的に BSE 感受率がどのように電流-電流相関関数に接続するかを明示していなかった。上式は DMFT における光学頂点補正の標準的な定式化であり、実装にはこの経路が不可欠である。添字の詳細な収縮構造については Toschi et al., Phys. Rev. B 75, 045118 (2007) 及び Kaufmann et al., Phys. Rev. B 100, 075119 (2019) を参照すべきである。
+
 ### 5.15 光学伝導度と誘電関数
 
 実周波数上の遅延相関関数 \(\Pi_{\mu\nu}^{R}(\omega)\) が得られれば、
@@ -686,9 +837,9 @@ T_{\tau}
 \right]
 \]
 
-で光学伝導度を計算できる。
+で光学伝導度を計算できる。ここで \(\Pi^{R}_{\mu\nu}(0)\) の減算は反磁性項を相殺して電荷保存（f 総和則）を保証するために必要である。
 
-誘電関数は単位系に依存する係数を明示すれば
+誘電関数は Gauss 単位系（CGS）で
 
 \[
 \varepsilon_{\mu\nu}(\omega)
@@ -699,7 +850,7 @@ T_{\tau}
 \sigma_{\mu\nu}(\omega)
 \]
 
-で与えられる。
+で与えられる（SI 単位系では \(4\pi\) が \(1/\varepsilon_0\) に置き換わる）。
 
 吸収係数は複素屈折率
 
@@ -717,6 +868,8 @@ T_{\tau}
 \]
 
 とする。
+
+> **異方性結晶への注意**: MnF₂ はルチル型正方晶系であり、誘電テンソルは 2 つの独立成分 \(\varepsilon_{xx} = \varepsilon_{yy}\) と \(\varepsilon_{zz}\) を持つ。上記の吸収係数 \(\alpha_\mu\) は、主軸 \(\mu\) 方向に偏光した光がその軸に垂直に伝播する場合に有効である。一般の偏光・伝播方向に対しては、誘電テンソルの固有値問題（常光線・異常光線の分離）を解く必要がある。本設計では主軸偏光成分の計算を一次目標とする。
 
 ---
 
@@ -812,43 +965,43 @@ Matsubara 軸の
 
 #### 既存モジュールの拡張
 
-1. `/home/runner/work/abinit/abinit/src/65_paw/m_paw_dmft.F90`  
+1. `src/65_paw/m_paw_dmft.F90`  
    DFT+DMFT 応答計算の初期化フラグとログ出力を追加する。
 
-2. `/home/runner/work/abinit/abinit/src/57_iovars/m_invars1.F90`  
-   `/home/runner/work/abinit/abinit/src/57_iovars/m_invars2.F90`  
+2. `src/57_iovars/m_invars1.F90`  
+   `src/57_iovars/m_invars2.F90`  
    応答計算用の入力変数を追加する。
 
-3. `/home/runner/work/abinit/abinit/src/57_iovars/m_chkinp.F90`  
+3. `src/57_iovars/m_chkinp.F90`  
    入力整合性検査を追加する。
 
-4. `/home/runner/work/abinit/abinit/src/95_drive/m_respfn_driver.F90`  
+4. `src/95_drive/m_respfn_driver.F90`  
    応答ドライバの分岐に DFT+DMFT 吸収計算を追加する。
 
-5. `/home/runner/work/abinit/abinit/src/67_triqs_ext/triqs_cthyb_qmc.cpp`  
+5. `src/67_triqs_ext/triqs_cthyb_qmc.cpp`  
    二粒子測定および頂点出力の連携口を追加する。
 
 #### 新規モジュール
 
-1. `/home/runner/work/abinit/abinit/src/68_dmft/m_dmft_spinor_proj.F90`  
+1. `src/68_dmft/m_dmft_spinor_proj.F90`  
    スピノル投影子と相関部分空間の管理
 
-2. `/home/runner/work/abinit/abinit/src/68_dmft/m_dmft_two_particle.F90`  
+2. `src/68_dmft/m_dmft_two_particle.F90`  
    局所二粒子相関関数の保持
 
-3. `/home/runner/work/abinit/abinit/src/68_dmft/m_dmft_vertex.F90`  
+3. `src/68_dmft/m_dmft_vertex.F90`  
    局所既約頂点の構築
 
-4. `/home/runner/work/abinit/abinit/src/68_dmft/m_dmft_lattice_bse.F90`  
+4. `src/68_dmft/m_dmft_lattice_bse.F90`  
    格子 bubble と Bethe-Salpeter 方程式の解法
 
-5. `/home/runner/work/abinit/abinit/src/68_dmft/m_dmft_optic_kernel.F90`  
+5. `src/68_dmft/m_dmft_optic_kernel.F90`  
    電流頂点と光学カーネル
 
-6. `/home/runner/work/abinit/abinit/src/68_dmft/m_dmft_realaxis_response.F90`  
+6. `src/68_dmft/m_dmft_realaxis_response.F90`  
    実周波数応答の正式 backend
 
-7. `/home/runner/work/abinit/abinit/src/95_drive/m_dmft_absorption_driver.F90`  
+7. `src/95_drive/m_dmft_absorption_driver.F90`  
    ユーザーが直接叩く高水準ドライバ
 
 ### 7.2 提案入力変数
@@ -948,7 +1101,7 @@ alpha_mu(ir, mu)
 
 ## 9. アルゴリズム設計
 
-## 9.1 基底状態ステージ
+### 9.1 基底状態ステージ
 
 ```mermaid
 flowchart TD
@@ -963,7 +1116,7 @@ flowchart TD
     A8 -- はい --> A9[一粒子量を凍結して応答ステージへ]
 ```
 
-## 9.2 二粒子測定ステージ
+### 9.2 二粒子測定ステージ
 
 ```mermaid
 flowchart TD
@@ -975,7 +1128,7 @@ flowchart TD
     B6 --> B7[局所頂点を保存]
 ```
 
-## 9.3 格子応答ステージ
+### 9.3 格子応答ステージ
 
 ```mermaid
 flowchart TD
@@ -1006,10 +1159,15 @@ flowchart TD
 
 本件は、**TDDFT 拡張ではなく DMFT 応答の新規ドライバ**として切り出すべきである。
 
+同様に、既存の GW+BSE 実装（`src/71_bse/`）を直接流用することも不適切である。GW+BSE では励起子カーネルが遮蔽 Coulomb 相互作用 \(W\) であるのに対し、DMFT+BSE では局所既約頂点 \(\Gamma^{\text{imp}}\) である。入力データ構造、周波数依存性の扱い、k 点ループの構造がすべて異なる。ただし、行列対角化や出力整形の低レベルルーチンについては再利用を検討すべきである。
+
 ### 10.2 density-density solver を禁止する
 
-ABINIT 内部 CT-QMC や `dmft_solv = 6` は、本件の主対象には不十分である。  
-スピン反転励起を正面から扱う以上、`dmft_solv = 7` 以外を許すべきではない。
+ABINIT 内部 CT-QMC（`dmft_solv = 5` および `dmft_solv = 8`）は density-density 相互作用のみを扱う。  
+`dmft_solv = 6`（TRIQS/CT-HYB、density-density 近似）も同様である。  
+スピン反転励起を正面から扱う以上、**回転不変 Slater 相互作用を扱える `dmft_solv = 7` 以外を許すべきではない**。
+
+> **注意**: 元の設計書では `dmft_solv = 6` を「ABINIT 内部 CT-QMC」と記載していたが、これは誤りである。`dmft_solv = 6` は TRIQS/CT-HYB の density-density 近似モードであり、ABINIT 内部ソルバーではない。ABINIT 内部の CT-QMC ソルバーは `dmft_solv = 5`（対角ハイブリダイゼーション）と `dmft_solv = 8`（オフ対角ハイブリダイゼーション対応、スピノル対応）である。
 
 ### 10.3 オフ対角ハイブリダイゼーションを残す
 
@@ -1123,6 +1281,8 @@ N_{\Omega}
 
 Mn \(3d\) 全軌道を扱うなら \(N_{\text{orb}}=5\) なので、フルテンソル保存は極めて重い。
 
+> **具体的な見積もり**: \(N_{\text{orb}}=5, N_\sigma=2\) のとき複合添字サイズは \(N_{\text{orb}}^2 \times N_\sigma^2 = 100\) である。フェルミ Matsubara 周波数を \(N_\omega = 100\) とすると、BSE 行列の各ボソン周波数 \(\Omega_m\) における行列サイズは \(100 \times N_\omega = 10{,}000\) 次元の正方行列となる。複素数（16 バイト）で \(10{,}000^2 \times 16 \approx 1.6\,\text{GB}\) であり、\(N_\Omega = 50\) ボソン周波数を保持すると頂点全体で \(\sim 80\,\text{GB}\) に達する。この見積もりはフルテンソル保存の場合であり、対称性によるブロック化で大幅に削減できる可能性があるが、物理的に根拠のない切り捨ては行わない。
+
 したがって必要なのは
 
 1. 複合添字化
@@ -1210,12 +1370,12 @@ CT-HYB の二粒子量は一粒子量よりはるかにノイジーであるた�
 
 ## 17. 根拠として参照したリポジトリ内ファイル
 
-- `/home/runner/work/abinit/abinit/doc/topics/_DMFT.md`
-- `/home/runner/work/abinit/abinit/doc/topics/_DmftTriqsCthyb.md`
-- `/home/runner/work/abinit/abinit/doc/tutorial/dmft.md`
-- `/home/runner/work/abinit/abinit/doc/tutorial/dmft_triqs.md`
-- `/home/runner/work/abinit/abinit/doc/theory/noncollinear.md`
-- `/home/runner/work/abinit/abinit/src/65_paw/m_paw_dmft.F90`
-- `/home/runner/work/abinit/abinit/src/79_seqpar_mpi/m_tddft.F90`
-- `/home/runner/work/abinit/abinit/src/62_ctqmc/m_Ctqmcoffdiag.F90`
-- `/home/runner/work/abinit/abinit/src/62_ctqmc/m_GreenHyboffdiag.F90`
+- `doc/topics/_DMFT.md`
+- `doc/topics/_DmftTriqsCthyb.md`
+- `doc/tutorial/dmft.md`
+- `doc/tutorial/dmft_triqs.md`
+- `doc/theory/noncollinear.md`
+- `src/65_paw/m_paw_dmft.F90`
+- `src/79_seqpar_mpi/m_tddft.F90`
+- `src/62_ctqmc/m_Ctqmcoffdiag.F90`
+- `src/62_ctqmc/m_GreenHyboffdiag.F90`

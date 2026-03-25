@@ -34,6 +34,7 @@ MODULE m_dmft_lattice_bse
  use m_errors
 
  use m_hide_lapack, only : xginv
+ use m_abi_linalg, only : abi_zgemm_2dd
  use m_paw_dmft, only : paw_dmft_type
  use m_green, only : green_type
  use m_dmft_vertex, only : vertex_irr_type
@@ -211,13 +212,13 @@ subroutine compute_chi0_lattice(lbse, green_imp, paw_dmft, sproj, &
  integer, intent(in) :: norb_corr, niw_vertex, nboson
 
 !Local variables
- integer :: iom, iw, iw_shifted, ik
+ integer :: iom, iw, iw_shifted, ik, iw_max
  integer :: ialpha, ibeta, igamma, idelta
- integer :: ia, ib, norb_sq, idx_i, idx_j
+ integer :: norb_sq, idx_i, idx_j
  integer :: mbandc
  real(dp) :: beta, wk
  complex(dp), allocatable :: gloc_n(:,:), gloc_np(:,:)
- complex(dp), allocatable :: temp_mat(:,:)
+ complex(dp), allocatable :: temp_mat(:,:), proj_k(:,:)
  character(len=500) :: msg
 
 ! *********************************************************************
@@ -225,7 +226,8 @@ subroutine compute_chi0_lattice(lbse, green_imp, paw_dmft, sproj, &
  write(msg,'(a)') ' compute_chi0_lattice: Computing lattice bubble at q=0'
  call wrtout(std_out, msg)
 
- ! --- Validate KS data availability ---
+ ! --- Validate KS data availability across all needed frequencies ---
+ iw_max = niw_vertex + nboson - 1
  if (green_imp%oper(1)%has_operks /= 1) then
    write(msg,'(3a)') &
    'compute_chi0_lattice: Green function does not have KS basis data.',ch10,&
@@ -234,9 +236,18 @@ subroutine compute_chi0_lattice(lbse, green_imp, paw_dmft, sproj, &
    lbse%chi0_latt = czero
    return
  end if
+ ! Verify KS data exists for the highest frequency needed
+ if (green_imp%oper(iw_max)%has_operks /= 1) then
+   write(msg,'(a,i6,a)') &
+   'compute_chi0_lattice: KS data not available at frequency index ', iw_max, &
+   '. Leaving chi0_latt as zero.'
+   ABI_WARNING(msg)
+   lbse%chi0_latt = czero
+   return
+ end if
 
  ! --- Validate frequency bounds ---
- if (niw_vertex + nboson - 1 > green_imp%nw) then
+ if (iw_max > green_imp%nw) then
    write(msg,'(a,i6,a,i6,a,i6)') &
    'compute_chi0_lattice: frequency bounds exceeded. niw_vertex=', niw_vertex, &
    ' nboson=', nboson, ' but green has nw=', green_imp%nw
@@ -255,19 +266,19 @@ subroutine compute_chi0_lattice(lbse, green_imp, paw_dmft, sproj, &
  ABI_MALLOC(gloc_n, (norb_corr, norb_corr))
  ABI_MALLOC(gloc_np, (norb_corr, norb_corr))
  ABI_MALLOC(temp_mat, (norb_corr, mbandc))
+ ABI_MALLOC(proj_k, (norb_corr, mbandc))
 
  lbse%chi0_latt = czero
 
  ! --- Compute lattice bubble ---
  ! chi0^latt_{(ab,n),(gd,n')}(iOm) = -beta * delta_{nn'} *
- !   (1/Nk) sum_k G^loc_{da}(k,iwn) * G^loc_{bg}(k,iwn+iOm)
+ !   sum_k wk * G^loc_{da}(k,iwn) * G^loc_{bg}(k,iwn+iOm)
  !
- ! G^loc_{ab}(k,iw) = sum_{c,d} P_{ac}(k) G^KS_{cd}(k,iw) P*_{bd}(k)
- !   = [ chipsi * G^KS * chipsi^dagger ]_{ab}
+ ! G^loc(k,iw) = P(k) * G^KS(k,iw) * P(k)^dagger
  !
- ! Computed using two matrix multiplies:
- !   temp = chipsi(k) * G^KS(k,iw)    [norb_corr x mbandc]
- !   G^loc = temp * chipsi(k)^dagger   [norb_corr x norb_corr]
+ ! Computed using BLAS (abi_zgemm_2dd):
+ !   temp = P(k) * G^KS(k,iw)          [norb_corr x mbandc]
+ !   G^loc = temp * P(k)^dagger         [norb_corr x norb_corr]
 
  do iom = 1, nboson
    do iw = 1, niw_vertex
@@ -276,47 +287,30 @@ subroutine compute_chi0_lattice(lbse, green_imp, paw_dmft, sproj, &
      do ik = 1, lbse%nkpt
        wk = paw_dmft%wtk(ik)
 
-       ! --- Project G^KS(k, iw_n) to local basis ---
-       ! temp = chipsi * G^KS  (norb_corr x mbandc)
-       do ialpha = 1, norb_corr
-         do ib = 1, mbandc
-           temp_mat(ialpha, ib) = czero
-           do ia = 1, mbandc
-             temp_mat(ialpha, ib) = temp_mat(ialpha, ib) + &
-               sproj%proj(ialpha, ia, ik) * green_imp%oper(iw)%ks(ia, ib, ik, 1)
-           end do
-         end do
-       end do
-       ! G^loc = temp * chipsi^dagger  (norb_corr x norb_corr)
-       do ialpha = 1, norb_corr
-         do ibeta = 1, norb_corr
-           gloc_n(ialpha, ibeta) = czero
-           do ib = 1, mbandc
-             gloc_n(ialpha, ibeta) = gloc_n(ialpha, ibeta) + &
-               temp_mat(ialpha, ib) * conjg(sproj%proj(ibeta, ib, ik))
-           end do
-         end do
-       end do
+       ! Extract projector for this k-point
+       proj_k(:,:) = sproj%proj(:,:,ik)
 
-       ! --- Project G^KS(k, iw_n + iOm_m) to local basis ---
-       do ialpha = 1, norb_corr
-         do ib = 1, mbandc
-           temp_mat(ialpha, ib) = czero
-           do ia = 1, mbandc
-             temp_mat(ialpha, ib) = temp_mat(ialpha, ib) + &
-               sproj%proj(ialpha, ia, ik) * green_imp%oper(iw_shifted)%ks(ia, ib, ik, 1)
-           end do
-         end do
-       end do
-       do ialpha = 1, norb_corr
-         do ibeta = 1, norb_corr
-           gloc_np(ialpha, ibeta) = czero
-           do ib = 1, mbandc
-             gloc_np(ialpha, ibeta) = gloc_np(ialpha, ibeta) + &
-               temp_mat(ialpha, ib) * conjg(sproj%proj(ibeta, ib, ik))
-           end do
-         end do
-       end do
+       ! --- Project G^KS(k, iw_n) to local basis using BLAS ---
+       ! temp = P(k) * G^KS(k,iw)  [norb_corr x mbandc]
+       call abi_zgemm_2dd("N", "N", norb_corr, mbandc, mbandc, cone, &
+         proj_k, norb_corr, &
+         green_imp%oper(iw)%ks(1, 1, ik, 1), mbandc, &
+         czero, temp_mat, norb_corr)
+       ! G^loc_n = temp * P(k)^dagger  [norb_corr x norb_corr]
+       call abi_zgemm_2dd("N", "C", norb_corr, norb_corr, mbandc, cone, &
+         temp_mat, norb_corr, &
+         proj_k, norb_corr, &
+         czero, gloc_n, norb_corr)
+
+       ! --- Project G^KS(k, iw_n + iOm_m) to local basis using BLAS ---
+       call abi_zgemm_2dd("N", "N", norb_corr, mbandc, mbandc, cone, &
+         proj_k, norb_corr, &
+         green_imp%oper(iw_shifted)%ks(1, 1, ik, 1), mbandc, &
+         czero, temp_mat, norb_corr)
+       call abi_zgemm_2dd("N", "C", norb_corr, norb_corr, mbandc, cone, &
+         temp_mat, norb_corr, &
+         proj_k, norb_corr, &
+         czero, gloc_np, norb_corr)
 
        ! --- Accumulate into lattice bubble ---
        ! chi0^latt += -beta * wk * G^loc_{da}(k,iw) * G^loc_{bg}(k,iw+iOm)
@@ -341,6 +335,7 @@ subroutine compute_chi0_lattice(lbse, green_imp, paw_dmft, sproj, &
  ABI_FREE(gloc_n)
  ABI_FREE(gloc_np)
  ABI_FREE(temp_mat)
+ ABI_FREE(proj_k)
 
  write(msg,'(a,i8,a)') &
  ' compute_chi0_lattice: Lattice bubble computed (', lbse%ndim_comp, ' composite indices)'

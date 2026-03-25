@@ -268,24 +268,15 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc, green_imp)
    & sproj=sproj, norb_corr=norb_corr, niw_vertex=niw_vertex, nboson=nboson)
 
  ! Write lattice bubble diagnostics (reuse chi_loc write format)
- call init_chi_loc(chi0_atom, norb_corr, niw_vertex, nboson)
- chi0_atom%chi_mat(:,:,:) = latt_bse%chi0_latt(:,:,:)
- call write_chi_loc(chi0_atom, 'DMFT_chi0_lattice.dat')
- call destroy_chi_loc(chi0_atom)
+ call write_chi_mat_as_chi_loc(latt_bse%chi0_latt, norb_corr, niw_vertex, nboson, &
+   & 'DMFT_chi0_lattice.dat')
 
  ! Stage 4b: Spectral attribution of lattice bubble
  if (dtset%dmft_resp_spinflip == 1 .and. paw_dmft%nspinor == 2) then
    write(msg,'(a)') '   Stage 4b: Spectral attribution of lattice bubble chi0_latt'
    call wrtout(std_out, msg)
-
-   call init_spectral_attribution(attrib_tmp, nboson, ndim_orb, paw_dmft%nspinor)
-   ! Create temporary chi_loc_type view of chi0_latt for attribution
-   call init_chi_loc(chi0_atom, norb_corr, niw_vertex, nboson)
-   chi0_atom%chi_mat(:,:,:) = latt_bse%chi0_latt(:,:,:)
-   call compute_spectral_attribution(attrib_tmp, chi0_atom, paw_dmft%nspinor)
-   call write_spectral_attribution(attrib_tmp, 'DMFT_attrib_chi0_lattice.dat', beta)
-   call destroy_spectral_attribution(attrib_tmp)
-   call destroy_chi_loc(chi0_atom)
+   call attribute_chi_mat(latt_bse%chi0_latt, norb_corr, niw_vertex, nboson, &
+     & ndim_orb, paw_dmft%nspinor, beta, 'DMFT_attrib_chi0_lattice.dat')
  end if
 
  ! --- Solve BSE ---
@@ -295,14 +286,8 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc, green_imp)
  if (dtset%dmft_resp_spinflip == 1 .and. paw_dmft%nspinor == 2) then
    write(msg,'(a)') '   Stage 4c: Spectral attribution of BSE chi_full'
    call wrtout(std_out, msg)
-
-   call init_spectral_attribution(attrib_tmp, nboson, ndim_orb, paw_dmft%nspinor)
-   call init_chi_loc(chi0_atom, norb_corr, niw_vertex, nboson)
-   chi0_atom%chi_mat(:,:,:) = latt_bse%chi_full(:,:,:)
-   call compute_spectral_attribution(attrib_tmp, chi0_atom, paw_dmft%nspinor)
-   call write_spectral_attribution(attrib_tmp, 'DMFT_attrib_chi_full.dat', beta)
-   call destroy_spectral_attribution(attrib_tmp)
-   call destroy_chi_loc(chi0_atom)
+   call attribute_chi_mat(latt_bse%chi_full, norb_corr, niw_vertex, nboson, &
+     & ndim_orb, paw_dmft%nspinor, beta, 'DMFT_attrib_chi_full.dat')
  end if
 
  ! =====================================================================
@@ -337,6 +322,72 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc, green_imp)
  call wrtout(std_out, msg)
 
 end subroutine dmft_absorption_run
+
+!!***
+
+!!****f* m_dmft_absorption_driver/write_chi_mat_as_chi_loc
+!! NAME
+!!  write_chi_mat_as_chi_loc
+!!
+!! FUNCTION
+!!  Write a chi_mat array to file using the chi_loc_type write format.
+!!  Creates a temporary chi_loc_type, copies data, writes, and destroys.
+!!
+!! SOURCE
+
+subroutine write_chi_mat_as_chi_loc(chi_mat, norb_corr, niw_vertex, nboson, fname)
+
+ complex(dp), intent(in) :: chi_mat(:,:,:)
+ integer, intent(in) :: norb_corr, niw_vertex, nboson
+ character(len=*), intent(in) :: fname
+
+!Local variables
+ type(chi_loc_type) :: chi_tmp
+
+! *********************************************************************
+
+ call init_chi_loc(chi_tmp, norb_corr, niw_vertex, nboson)
+ chi_tmp%chi_mat(:,:,:) = chi_mat(:,:,:)
+ call write_chi_loc(chi_tmp, trim(fname))
+ call destroy_chi_loc(chi_tmp)
+
+end subroutine write_chi_mat_as_chi_loc
+
+!!***
+
+!!****f* m_dmft_absorption_driver/attribute_chi_mat
+!! NAME
+!!  attribute_chi_mat
+!!
+!! FUNCTION
+!!  Perform spectral attribution on a chi_mat array and write to file.
+!!  Creates temporary chi_loc_type and spectral_attribution_type objects.
+!!
+!! SOURCE
+
+subroutine attribute_chi_mat(chi_mat, norb_corr, niw_vertex, nboson, &
+  & ndim_orb, nspinor, beta, fname)
+
+ complex(dp), intent(in) :: chi_mat(:,:,:)
+ integer, intent(in) :: norb_corr, niw_vertex, nboson, ndim_orb, nspinor
+ real(dp), intent(in) :: beta
+ character(len=*), intent(in) :: fname
+
+!Local variables
+ type(chi_loc_type) :: chi_tmp
+ type(spectral_attribution_type) :: attrib
+
+! *********************************************************************
+
+ call init_spectral_attribution(attrib, nboson, ndim_orb, nspinor)
+ call init_chi_loc(chi_tmp, norb_corr, niw_vertex, nboson)
+ chi_tmp%chi_mat(:,:,:) = chi_mat(:,:,:)
+ call compute_spectral_attribution(attrib, chi_tmp, nspinor)
+ call write_spectral_attribution(attrib, trim(fname), beta)
+ call destroy_spectral_attribution(attrib)
+ call destroy_chi_loc(chi_tmp)
+
+end subroutine attribute_chi_mat
 
 !!***
 

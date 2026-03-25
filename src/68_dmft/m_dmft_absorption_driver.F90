@@ -48,7 +48,10 @@ MODULE m_dmft_absorption_driver
                                & kpoint_chi0_attrib_type, init_kpoint_chi0_attrib, &
                                & destroy_kpoint_chi0_attrib, write_kpoint_chi0_attrib
  use m_dmft_optic_kernel, only : optic_kernel_type, init_optic_kernel, destroy_optic_kernel, &
-                                & compute_bubble_conductivity, write_optic_kernel
+                                & compute_bubble_conductivity, write_optic_kernel, &
+                                & optic_orbital_attrib_type, init_optic_orbital_attrib, &
+                                & destroy_optic_orbital_attrib, compute_optic_orbital_attrib, &
+                                & write_optic_orbital_attrib
  use m_dmft_spectral_attribution, only : spectral_attribution_type, &
    & init_spectral_attribution, destroy_spectral_attribution, &
    & compute_spectral_attribution, write_spectral_attribution, &
@@ -107,6 +110,7 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc, green_imp)
  type(vertex_irr_type) :: vertex_irr
  type(lattice_bse_type) :: latt_bse
  type(optic_kernel_type) :: optic_kern
+ type(optic_orbital_attrib_type) :: optic_orb_attrib
  type(spinor_proj_type) :: sproj
  type(spectral_attribution_type) :: attrib_tmp
  type(spectral_attribution_type) :: attrib_imp
@@ -405,6 +409,47 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc, green_imp)
 
    write(msg,'(a)') ' Matsubara-axis response computation complete.'
    call wrtout(std_out, msg)
+
+   ! =====================================================================
+   ! Stage 5a: Orbital-resolved optical conductivity attribution
+   ! =====================================================================
+   ! Projects velocity matrix elements and Green functions into the correlated
+   ! orbital subspace and decomposes Pi_mu_nu by orbital pair (m,m').
+   ! Uses the last atom's spinor projector (sproj) from Stage 4's loop.
+   ! For multi-atom systems where all correlated atoms have the same lpawu,
+   ! the projector for the last processed atom is representative.
+   if (do_spinflip_attrib) then
+     write(msg,'(a)') ' Stage 5a: Orbital-resolved optical conductivity attribution'
+     call wrtout(std_out, msg)
+
+     call init_optic_orbital_attrib(optic_orb_attrib, nboson, 3, ndim_orb, paw_dmft%nspinor)
+
+     ! Accumulate orbital-resolved attribution from all correlated atoms
+     ! Use the same multi-atom loop as Stage 4 for consistency
+     iatom_latt_count = 0
+     do iatom = 1, paw_dmft%natom
+       if (paw_dmft%lpawu(iatom) < 0) cycle
+       if (paw_dmft%lpawu(iatom) /= paw_dmft%maxlpawu) cycle
+
+       iatom_latt_count = iatom_latt_count + 1
+
+       ! Populate spinor projectors for this atom
+       call populate_from_chipsi(sproj, paw_dmft, iatom)
+
+       ! Compute orbital-resolved attribution for this atom
+       ! First atom: ladd=.false. (zeros then fills)
+       ! Subsequent atoms: ladd=.true. (accumulates into existing values)
+       call compute_optic_orbital_attrib(optic_orb_attrib, paw_dmft, green_imp, sproj, &
+         & nboson, niw_vertex, paw_dmft%nspinor, ndim_orb, &
+         & ladd=(iatom_latt_count > 1))
+     end do
+
+     ! Write orbital attribution output with coverage fraction
+     call write_optic_orbital_attrib(optic_orb_attrib, optic_kern%pi_bubble, &
+       & 'DMFT_attrib_optic_orbital.dat', beta)
+
+     call destroy_optic_orbital_attrib(optic_orb_attrib)
+   end if
 
    call destroy_optic_kernel(optic_kern)
  end if

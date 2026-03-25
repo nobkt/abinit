@@ -86,6 +86,7 @@ module m_vtorho
  use m_dmft,               only : dmft_solve
  use m_datafordmft,        only : datafordmft
  use m_dmft_current_vertex, only : compute_psinablapsi_dmft
+ use m_paw_onsite,         only : pawnabla_init
  use m_fourier_interpol,   only : transgrid
  use m_cgprj,              only : ctocprj
  use m_wvl_rho,            only : wvl_mkrho
@@ -1548,6 +1549,13 @@ subroutine vtorho(afford,atindx,atindx1,cg,compch_fft,cprj,cpus,dbl_nnsclo,&
 
 !        == compute momentum matrix elements for DMFT optical response
          if (dtset%dmft_resp_mode > 0) then
+!          Ensure PAW nabla_ij matrix elements are available for velocity computation.
+!          pawnabla_init computes <phi_i|nabla|phi_j> - <tphi_i|nabla|tphi_j>
+!          which is needed for the PAW augmentation part of momentum matrix elements.
+!          Without this call, only the kinetic (plane-wave) part would be computed.
+           if (.not. all(pawtab(:)%has_nabla >= 2)) then
+             call pawnabla_init(psps%mpsang, ntypat, pawrad, pawtab)
+           end if
            call compute_psinablapsi_dmft(paw_dmft, cg(:,:), cprj(:,:), kg, gprimd, dtset, &
              & pawtab(:), cryst_struc, gs_hamk%dimcprj(:), mcg, mband_cprj, my_nspinor, &
              & usecprj_local, mpi_enreg%comm_kpt, mpi_enreg%proc_distrb)

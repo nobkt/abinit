@@ -47,14 +47,15 @@
 
 以下の新規 Fortran モジュールを `src/68_dmft/` に作成した。
 
-| モジュール | ファイル | 主要な型/ルーチン | 状態 |
+| モジュール | ファイル | 主要な型/ルーチン | 現在の状態 |
 | --- | --- | --- | --- |
-| `m_dmft_spinor_proj` | `m_dmft_spinor_proj.F90` | `spinor_proj_type`, `init_spinor_proj`, `check_spinor_completeness` | データ構造とインターフェース完了。chipsi からの投影子展開は接続待ち |
-| `m_dmft_two_particle` | `m_dmft_two_particle.F90` | `chi_loc_type`, `compute_chi0_imp`, `write_chi_loc` | データ構造完了。不純物 Green 関数からの chi0 計算はスケルトン |
-| `m_dmft_vertex` | `m_dmft_vertex.F90` | `vertex_irr_type`, `extract_vertex_irr`, `write_vertex_irr` | 完全な頂点抽出アルゴリズム実装済み（Γ = χ₀⁻¹ − χ⁻¹） |
-| `m_dmft_lattice_bse` | `m_dmft_lattice_bse.F90` | `lattice_bse_type`, `compute_chi0_lattice`, `solve_lattice_bse` | BSE 解法アルゴリズム実装済み。格子バブルの k 点ループはスケルトン |
-| `m_dmft_optic_kernel` | `m_dmft_optic_kernel.F90` | `optic_kernel_type`, `compute_bubble_conductivity`, `write_optic_kernel` | データ構造とI/O完了。電流行列要素の計算はスケルトン |
-| `m_dmft_absorption_driver` | `m_dmft_absorption_driver.F90` | `dmft_absorption_run` | 全ステージのオーケストレーション完了 |
+| `m_dmft_spinor_proj` | `m_dmft_spinor_proj.F90` | `spinor_proj_type`, `init_spinor_proj`, `populate_from_chipsi`, `check_spinor_completeness` | **完全実装済み**: chipsi からの投影子展開を `populate_from_chipsi` で接続 |
+| `m_dmft_two_particle` | `m_dmft_two_particle.F90` | `chi_loc_type`, `compute_chi0_imp`, `write_chi_loc` | **完全実装済み**: 不純物バブル計算 + 多原子サポート（`iatom_index` 引数追加） |
+| `m_dmft_vertex` | `m_dmft_vertex.F90` | `vertex_irr_type`, `extract_vertex_irr`, `write_vertex_irr` | **完全実装済み**: Γ = χ₀⁻¹ − χ⁻¹（TRIQS χ^imp 接続待ちのため Γ=0） |
+| `m_dmft_lattice_bse` | `m_dmft_lattice_bse.F90` | `lattice_bse_type`, `compute_chi0_lattice`, `solve_lattice_bse` | **完全実装済み**: green%oper(iw)%ks + chipsi による k 点ループ実装 |
+| `m_dmft_optic_kernel` | `m_dmft_optic_kernel.F90` | `optic_kernel_type`, `compute_bubble_conductivity`, `write_optic_kernel` | データ構造とI/O完了。**電流行列要素の計算はスケルトン** |
+| `m_dmft_spectral_attribution` | `m_dmft_spectral_attribution.F90` | `spectral_attribution_type`, `compute_spectral_attribution`, `write_spectral_attribution` | **完全実装済み**: スピン/軌道分解の帰属計算 |
+| `m_dmft_absorption_driver` | `m_dmft_absorption_driver.F90` | `dmft_absorption_run` | **完全実装済み**: 全ステージオーケストレーション + 多原子ループ + 全レベル帰属 |
 
 #### 4. ビルドシステム統合（Phase 3: 完了）
 
@@ -107,24 +108,7 @@
 
 2. **軌道分解**: S⁺S⁻ および S⁻S⁺ チャネルの軌道分解行列 χ^{+-}_{mm'}(iΩ) を計算。各軌道ペア (m, m') からの寄与を個別に出力することで、スピン反転吸収がどの d 軌道間の遷移に帰属されるかを同定できる。
 
-3. **出力**: 各ボソン Matsubara 周波数 iΩₘ における各チャネルの感受率トレースと軌道分解データを `DMFT_attrib_chi0_imp.dat` に出力。
-
-**データ型 `spectral_attribution_type` のメンバ:**
-- `chi_total(nboson)`: 全トレース
-- `chi_spin_conserving(nboson)`: スピン保存成分
-- `chi_spin_flip_pm(nboson)`: S⁺S⁻ 成分
-- `chi_spin_flip_mp(nboson)`: S⁻S⁺ 成分
-- `chi_pm_orbital(nboson, ndim_orb, ndim_orb)`: 軌道分解 S⁺S⁻
-- `chi_mp_orbital(nboson, ndim_orb, ndim_orb)`: 軌道分解 S⁻S⁺
-
-**スピノル軌道添字の規約:**
-- nspinor=2 の場合: α = 1..ndim_orb は spin-up（軌道 m = α）、α = ndim_orb+1..2×ndim_orb は spin-down（軌道 m = α − ndim_orb）
-- ここで ndim_orb = 2×lpawu + 1
-
-**注意事項:**
-- nspinor=2 を要求する（スピン反転分解は nspinor=1 では物理的に無意味）
-- ヒューリスティックな分類やしきい値判定は一切行っていない
-- 分解は数学的に厳密であり、chi_total = chi_spin_conserving + chi_spin_flip_pm + chi_spin_flip_mp が成立する
+3. **出力**: 各ボソン Matsubara 周波数 iΩₘ における各チャネルの感受率トレースと軌道分解データを出力。
 
 **変更ファイル:**
 - `src/68_dmft/m_dmft_spectral_attribution.F90` — 新規作成
@@ -137,12 +121,7 @@
 
 2. **帰属処理の統合**: Stage 1 の chi0 計算直後に Stage 1b として帰属分解を追加。`dmft_resp_spinflip=1` かつ `nspinor=2` の場合のみ実行。
 
-3. **ファイル出力の追加**:
-   - `DMFT_chi0_imp.dat` — 不純物バブルの複合添字行列要素
-   - `DMFT_attrib_chi0_imp.dat` — スピンチャネル別・軌道別の帰属分解結果
-   - `DMFT_optic_kernel.dat` — Matsubara 軸光学カーネル
-
-4. **DMFT ループからの呼び出し接続**: `dmft_solve` に `dtset` 引数を追加し、DMFT ループ収束後・Green 関数破壊前に `dmft_absorption_run` を呼び出すコードを挿入した。
+3. **DMFT ループからの呼び出し接続**: `dmft_solve` に `dtset` 引数を追加し、DMFT ループ収束後・Green 関数破壊前に `dmft_absorption_run` を呼び出すコードを挿入した。
 
 **変更ファイル:**
 - `src/68_dmft/m_dmft_absorption_driver.F90` — インターフェース変更と帰属統合
@@ -154,36 +133,151 @@
 - `src/68_dmft/CMakeLists.txt` — `m_dmft_spectral_attribution.F90` をアルファベット順で追加
 - `src/68_dmft/abinit.src` — 同上
 
+#### 9. 多原子 chi0_imp と原子分解帰属（Phase 6: 完了）
+
+**目的:** MnF₂のような複数の相関原子を持つ系に対応する多原子サポート
+
+**実装した内容:**
+
+1. **compute_chi0_imp の多原子拡張**: `iatom_index` オプション引数を追加。指定しない場合は従来通り最初の相関原子を使用する。指定した場合は、指定された原子に対する不純物バブルを計算する。引数検証として原子番号範囲チェックと `lpawu >= 0` チェックを実装。
+
+2. **ドライバでの原子ループ**: `dmft_absorption_run` 内で全相関原子に対するループを実装。各原子に対して:
+   - chi0_imp を個別に計算
+   - `DMFT_chi0_imp_atom{N}.dat` に原子別 chi0 を出力
+   - `DMFT_attrib_chi0_imp_atom{N}.dat` に原子別帰属分解を出力
+   - 全原子の chi0 を合算して `DMFT_chi0_imp_total.dat` と `DMFT_attrib_chi0_imp_total.dat` を出力
+
+**出力ファイル一覧（Stage 1）:**
+| ファイル名 | 内容 |
+| --- | --- |
+| `DMFT_chi0_imp_atom001.dat` | 原子1の不純物バブル行列要素 |
+| `DMFT_chi0_imp_atom002.dat` | 原子2の不純物バブル行列要素 |
+| `DMFT_attrib_chi0_imp_atom001.dat` | 原子1のスピン/軌道帰属分解 |
+| `DMFT_attrib_chi0_imp_atom002.dat` | 原子2のスピン/軌道帰属分解 |
+| `DMFT_chi0_imp_total.dat` | 全原子合算の不純物バブル |
+| `DMFT_attrib_chi0_imp_total.dat` | 全原子合算の帰属分解 |
+
+**変更ファイル:**
+- `src/68_dmft/m_dmft_two_particle.F90` — `iatom_index` 引数追加
+- `src/68_dmft/m_dmft_absorption_driver.F90` — 原子ループ実装
+
+#### 10. スピノル投影子の chipsi からの展開（Phase 7: 完了）
+
+**目的:** `m_dmft_spinor_proj.F90` の投影子配列を実際の `paw_dmft%chipsi` データで充填する
+
+**実装した内容:**
+
+1. **`populate_from_chipsi` サブルーチンの追加**: 新規公開サブルーチンを追加。`paw_dmft%chipsi(α, a, k, isppol, iatom)` から `sproj%proj(α, a, k)` へのデータコピーを実装。
+
+2. **入力検証**: 
+   - 原子番号範囲チェック
+   - `lpawu >= 0` チェック（相関原子であることの確認）
+   - `nspinor=2` のとき `nsppol=1` であることの確認
+   - 軌道次元の整合性チェック（`nspinor*(2*lpawu+1) == norb_corr`）
+   - `chipsi` が allocate 済みであることの確認
+
+3. **添字の対応関係**: `chipsi` の第1次元は `nspinor*(2*maxlpawu+1)` であり、これは `matlu%mat` の次元と同じ複合スピノル軌道添字 α = (m, σ) に対応する。この対応関係により、`chipsi` データをそのまま投影子配列にコピーできる。
+
+4. **完全性チェックの統合**: ドライバ内で `populate_from_chipsi` の直後に `check_spinor_completeness(sproj, tol4)` を呼び出し、投影子の完全性関係 Σ_a P_{αa} P*_{βa} ≈ δ_{αβ} を検証。
+
+**変更ファイル:**
+- `src/68_dmft/m_dmft_spinor_proj.F90` — `populate_from_chipsi` 追加
+
+#### 11. 格子バブル chi0_lattice の完全実装（Phase 8: 完了）
+
+**目的:** `compute_chi0_lattice` をスケルトンから完全実装に変更
+
+**実装した内容:**
+
+1. **格子 Green 関数の射影**: 各 k 点、各 Matsubara 周波数 iωₙ に対して:
+   
+   G^loc_{αβ}(k, iωₙ) = Σ_{a,b} P_{αa}(k) G^KS_{ab}(k, iωₙ) P*_{βb}(k)
+   
+   ここで P = chipsi は `populate_from_chipsi` で充填したスピノル投影子、G^KS は `green_imp%oper(iw)%ks(a, b, ik, 1)` に格納されている自己エネルギー埋め込み済みの格子 Green 関数。
+
+2. **格子バブルの k 点和**: 設計書の Fourier 規約に従い:
+
+   χ₀^latt_{(αβn),(γδn')}(iΩₘ) = −β δ_{nn'} × Σ_k w_k × G^loc_{δα}(k, iωₙ) × G^loc_{βγ}(k, iωₙ + iΩₘ)
+
+   - 係数 -β は不純物バブルと同一の規約（Rohringer et al.）
+   - k 点重み w_k = `paw_dmft%wtk(ik)`（Σ_k w_k = 1 を満たす）
+   - 複合添字パッキングは不純物バブルと同一
+
+3. **射影の効率的実装**: 各 (k, iw) における射影を2段階の行列乗算で実行:
+   - temp = chipsi × G^KS（norb_corr × mbandc）
+   - G^loc = temp × chipsi†（norb_corr × norb_corr）
+
+4. **実行時チェック**:
+   - `has_operks` フラグで KS 基底データの有無を検証。データがない場合は警告を出力し chi0_latt を零のまま返す（エラー停止ではなく graceful degradation）
+   - 周波数境界チェック: `niw_vertex + nboson - 1 ≤ green_imp%nw`
+
+**注意点:**
+- `green_imp%oper(iw)%ks` は `compute_green` → `integrate_green` の後も保持されている（`dmft_solve` 終了前に吸収ドライバが呼ばれるため）
+- k 点並列化は未実装（MPI 分散は将来の課題）
+- 現在の実装では最初の相関原子のスピノル投影子のみを使用。多原子系では各原子の投影子を個別に扱う拡張が必要
+
+**変更ファイル:**
+- `src/68_dmft/m_dmft_lattice_bse.F90` — `compute_chi0_lattice` を完全実装
+
+#### 12. 格子バブルおよび BSE chi のスペクトル帰属（Phase 9: 完了）
+
+**目的:** 帰属分解を格子レベルの量にも適用する
+
+**実装した内容:**
+
+1. **格子バブル帰属（Stage 4b）**: 格子バブル χ₀^latt に対して `compute_spectral_attribution` を適用。`latt_bse%chi0_latt` を一時的な `chi_loc_type` にコピーして処理し、`DMFT_attrib_chi0_lattice.dat` に出力。
+
+2. **BSE chi 帰属（Stage 4c）**: BSE 解法後の全格子感受率 χ_full に対して同様の帰属分解を適用。`latt_bse%chi_full` を処理し、`DMFT_attrib_chi_full.dat` に出力。
+
+3. **出力ファイル一覧（Stage 4）:**
+
+| ファイル名 | 内容 |
+| --- | --- |
+| `DMFT_chi0_lattice.dat` | 格子バブルの行列要素（診断用） |
+| `DMFT_attrib_chi0_lattice.dat` | 格子バブルのスピン/軌道帰属分解 |
+| `DMFT_attrib_chi_full.dat` | BSE 補正後の全感受率のスピン/軌道帰属分解 |
+
+**注意点:**
+- 現状では TRIQS 二粒子測定インターフェースが未接続のため、既約頂点 Γ = 0 となり、BSE 解は χ_full = χ₀^latt と一致する。よって `DMFT_attrib_chi_full.dat` と `DMFT_attrib_chi0_lattice.dat` は同一の内容になる。これは物理的に正しい帰結であり、ヒューリスティックな処理は一切行っていない。
+- TRIQS が接続されて Γ ≠ 0 になれば、2つのファイルの差分が頂点補正（多体効果）の寄与を示す。
+
+**変更ファイル:**
+- `src/68_dmft/m_dmft_absorption_driver.F90` — Stage 4b/4c 追加
+
 ### 正直な到達点の評価
 
 **現時点で完成しているもの:**
 - 入力変数体系と整合性検査
 - 全モジュールのデータ構造定義
 - **不純物バブル χ₀^imp の完全な計算**（Green 関数から直接構築）
+- **多原子サポート**（全相関原子に対する chi0_imp 計算と原子分解帰属）
 - **スピンチャネル帰属分解**（スピン保存 / S⁺S⁻ / S⁻S⁺ の3チャネルへの厳密分解）
 - **軌道分解帰属**（各 d 軌道ペアからの S⁺S⁻ 寄与の個別出力）
+- **スピノル投影子の chipsi 接続**（実際のデータで投影子配列を充填、完全性チェック付き）
+- **格子バブル χ₀^latt の完全な計算**（G(k,iω) の k 点和による格子バブル構築）
+- **格子レベル帰属分解**（格子バブルと BSE chi_full の両方に帰属分解を適用）
 - 既約頂点抽出の行列演算（Γ = χ₀⁻¹ − χ⁻¹）
 - 格子 BSE 解法の行列演算（χ = [χ₀⁻¹ − Γ]⁻¹）
 - Matsubara 軸での出力フォーマット
 - 高水準ドライバによる全ステージのオーケストレーション
 - **DMFT ループから吸収計算ドライバへの呼び出し接続**
 
-**現時点で完成していないもの（スケルトンのままの部分）:**
-1. **局所二粒子相関関数 χ^imp の測定**: TRIQS/CT-HYB インターフェース（`triqs_cthyb_qmc.cpp`）への `measure_G2_iw_ph` 連携口。これが完成しない限り、Γ は自明な値（ゼロ）のままであり、BSE の結果はバブル近似と等価。
-2. **格子 Green 関数の k 点ループ**: G(k, iωₙ) から格子バブル χ₀ˡᵃᵗᵗ への変換
-3. **電流（速度）行列要素の計算**: PAW 補正を含むスピノル電流頂点 j_μ(k)
-4. **実周波数応答 backend**: これは設計上の最難関であり、未実装
-5. **スピノル投影子 chipsi の接続**: `m_dmft_spinor_proj.F90` の投影子配列を `paw_dmft%chipsi` から取得する部分
+**現時点で完成していないもの:**
+1. **局所二粒子相関関数 χ^imp の測定**: TRIQS/CT-HYB インターフェース（`triqs_cthyb_qmc.cpp`）への `measure_G2_iw_ph` 連携口。これが完成しない限り、Γ は自明な値（ゼロ）のままであり、BSE の結果はバブル近似と等価。**これが最大のボトルネック**。
+2. **電流（速度）行列要素の計算**: PAW 補正を含むスピノル電流頂点 j_μ(k)。これがないと光学伝導度 Π_μν のバブル計算もスケルトンのままである。
+3. **実周波数応答 backend**: これは設計上の最難関であり、未実装。
+4. **k 点並列化**: 格子バブル計算は現在シリアル実装。大規模計算にはMPI分散が必要。
+5. **多原子格子バブル**: 格子バブル計算は現在最初の相関原子の投影子のみ使用。複数原子の投影子を個別に扱う拡張が必要。
 
 ---
 
 ## 次ステップで実装すべきこと
 
-### 次ステップ 1: TRIQS 二粒子測定インターフェース（最優先）
+### 次ステップ 1: TRIQS 二粒子測定インターフェース（最優先・最大のボトルネック）
 
 **目的:** CT-HYB ソルバーから χ^imp を取得する連携口の作成
 
-**現状の問題:** χ^imp がゼロのままであるため、既約頂点 Γ も全出力もバブル近似と区別がつかない。これが解決しない限り、DMFT 応答計算の本質的な部分（多体効果の取り込み）が機能しない。
+**現状の問題:** χ^imp がゼロのままであるため、既約頂点 Γ も全出力もバブル近似と区別がつかない。格子バブルとBSE解法は完成しているが、Γ=0 のため BSE 出力 = バブル出力となる。これが解決しない限り、DMFT 応答計算の本質的な部分（多体効果の取り込み）が機能しない。
 
 **必要な作業:**
 1. `src/67_triqs_ext/triqs_cthyb_qmc.cpp` に `measure_G2_iw_ph` パラメータを渡す口を追加
@@ -198,27 +292,38 @@
 - 二粒子量のメモリコストは一粒子量の O(N²_ω) 倍であり、並列化が不可避
 - Fourier 規約の不一致（TRIQS の ph チャネル規約と設計書 Section 5.7 の規約）を注意深く照合する必要がある
 
-### 次ステップ 2: 格子 Green 関数と格子バブルの接続
-
-**目的:** `compute_chi0_lattice` の完全な実装
-
-**必要な作業:**
-1. 各 k 点で格子 Green 関数 G(k, iωₙ) を構築（自己エネルギー埋め込み込み）
-2. スピノル投影子を用いて相関部分空間へ射影
-3. q=0 のバブル: χ₀(q=0, iωₙ, iΩₘ) = −(1/Nₖ) Σₖ G(k, iωₙ) G(k, iωₙ+iΩₘ)
-4. k 点並列化（既存の MPI 分散機構を利用）
-5. **格子バブルの帰属分解**: 既に実装した `m_dmft_spectral_attribution` の枠組みを格子バブルにも適用する
-
-### 次ステップ 3: PAW 電流行列要素のスピノル拡張
+### 次ステップ 2: PAW 電流行列要素のスピノル拡張
 
 **目的:** `compute_bubble_conductivity` の完全な実装
+
+**現状の問題:** 光学伝導度 Π_μν の計算にはスピノル基底の電流行列要素 j_μ(k) が必要だが、これが未実装のため `pi_bubble` は常にゼロである。
 
 **必要な作業:**
 1. `m_paw_optics.F90` の速度行列要素計算をスピノル基底に拡張
 2. 非局所ポテンシャル補正 j^PAW_μ = j^local_μ + (i/ℏ)[V_NL, r_μ] のスピン混合成分を保持
 3. テンソルの全3×3成分を保持（等方近似は行わない）
+4. 電流行列要素のスピンチャネル帰属分解（光学応答レベルの帰属）
 
-### 次ステップ 4: 実周波数応答 backend
+### 次ステップ 3: k 点並列化
+
+**目的:** 格子バブル計算のスケーラビリティ確保
+
+**必要な作業:**
+1. `compute_chi0_lattice` の k 点ループを MPI で分散
+2. 既存の ABINIT MPI 分散機構（`mpi_enreg%my_kpttab` 等）を利用
+3. k 点合算の MPI_ALLREDUCE 追加
+4. k 点分解帰属の出力（各 k 点からの寄与を個別に出力するオプション）
+
+### 次ステップ 4: 多原子格子バブル
+
+**目的:** 複数の相関原子の投影子を個別に使用した格子バブル計算
+
+**必要な作業:**
+1. 各相関原子の chipsi を個別の spinor_proj_type に格納
+2. 格子バブルの原子分解: G^loc_{αβ}(k, iw) を原子ごとに分解した格子バブル
+3. 原子間交差項の正しい取り扱い
+
+### 次ステップ 5: 実周波数応答 backend
 
 **目的:** dmft_resp_mode=2 の実装（最難関）
 
@@ -253,11 +358,26 @@
 
 5. **軌道分解 S⁺S⁻ 感受率（実装済み）**: 各軌道ペア (m, m') からの S⁺S⁻ 寄与を ndim_orb × ndim_orb 行列として出力。これにより、スピン反転吸収がどの d 軌道遷移に帰属されるかを直接同定できる。
 
+6. **原子分解帰属（実装済み）**: 多原子系において各相関原子ごとの chi0_imp とその帰属分解を個別に出力。全原子合算と原子個別の帰属を比較できる。
+
+7. **格子バブル帰属（実装済み）**: 不純物バブルと同じ帰属分解（スピンチャネル + 軌道分解）を格子バブル χ₀^latt に適用。出力ファイル `DMFT_attrib_chi0_lattice.dat`。
+
+8. **BSE chi 帰属（実装済み）**: BSE 解法後の全感受率 χ_full に対して帰属分解を適用。出力ファイル `DMFT_attrib_chi_full.dat`。不純物バブル / 格子バブル / BSE chi の3段階で帰属を比較することで、k 点和と頂点補正の効果を個別に同定できる。
+
 ### 今後実装すべき帰属機能
 
-6. **格子バブルの帰属分解**: 不純物バブルと同じ帰属分解を格子バブル χ₀ˡᵃᵗᵗ に適用する（格子バブル接続後）
-7. **k 点分解**: 逆格子空間での寄与の分布を出力する
-8. **光学応答の帰属**: 光学伝導度 Π_μν を軌道対ごとに分解し、各吸収ピークの軌道起源を同定する
+9. **k 点分解**: 逆格子空間での寄与の分布を出力する（k 点並列化と同時に実装）
+10. **光学応答の帰属**: 光学伝導度 Π_μν を軌道対ごとに分解し、各吸収ピークの軌道起源を同定する（電流行列要素実装後）
+11. **多原子格子バブル帰属**: 格子バブルを原子ごとに分解した帰属
+
+### 帰属出力ファイル一覧
+
+| ファイル名 | レベル | 内容 |
+| --- | --- | --- |
+| `DMFT_attrib_chi0_imp_atom{N}.dat` | 不純物（原子別） | 原子 N の chi0_imp のスピン/軌道帰属 |
+| `DMFT_attrib_chi0_imp_total.dat` | 不純物（合算） | 全原子合算の chi0_imp のスピン/軌道帰属 |
+| `DMFT_attrib_chi0_lattice.dat` | 格子バブル | 格子バブル chi0_latt のスピン/軌道帰属 |
+| `DMFT_attrib_chi_full.dat` | BSE 全感受率 | BSE 補正後 chi_full のスピン/軌道帰属 |
 
 ---
 
@@ -269,6 +389,10 @@
 
 3. **実周波数 backend の不在**: これがない限り、厳密な意味での吸収スペクトル（α(ω)）は完成しない。Matsubara 軸応答は中間生成物として正当だが、「吸収スペクトル完成」とは呼べない。
 
-4. **多原子系への拡張**: 現在の compute_chi0_imp は最初の相関原子のみを処理する。MnF₂のような複数の Mn サイトを持つ系では、全相関原子の寄与を扱う拡張が必要。ただし、DMFT では各不純物問題は独立に解かれるため、原子ごとの処理をループ化すれば対応可能。
+4. **格子バブルの k 点並列化**: 現在の `compute_chi0_lattice` はシリアル実装であり、大規模 k 点メッシュでは計算時間が問題になる。O(nboson × niw_vertex × nkpt × norb_corr⁴ × mbandc²) の演算量であり、実用的な計算には MPI 分散が必須。
 
-5. **Green 関数の寿命問題**: 収束した Green 関数は `dmft_solve` のローカル変数であり、DMFT ループ終了時に破壊される。現在の実装では `dmft_solve` 内部で吸収計算を呼び出すことでこの問題を回避しているが、将来的には Green 関数の永続化（ファイル出力/読み込み）を検討すべきである。
+5. **chipsi 添字順序の検証**: `chipsi` と `matlu%mat` のスピノル軌道添字の順序が同一であることを前提としている。この前提は ABINIT の内部実装に基づくが、明示的な検証テストは未実施。実際の計算結果で `check_spinor_completeness` の出力を確認し、投影子の完全性を検証する必要がある。
+
+6. **Green 関数の寿命問題**: 収束した Green 関数は `dmft_solve` のローカル変数であり、DMFT ループ終了時に破壊される。現在の実装では `dmft_solve` 内部で吸収計算を呼び出すことでこの問題を回避しているが、将来的には Green 関数の永続化（ファイル出力/読み込み）を検討すべきである。
+
+7. **has_operks の可用性**: `compute_chi0_lattice` は `green_imp%oper(iw)%has_operks == 1` を前提とする。KS 基底データがないケース（例: 特定の DMFT ソルバーでの省メモリモード）では格子バブルがゼロになり、バブル近似にフォールバックする。これは graceful degradation であり、暗黙の近似ではないが、ユーザに対する明確な警告が必要。

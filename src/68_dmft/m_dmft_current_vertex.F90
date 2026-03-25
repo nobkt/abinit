@@ -155,7 +155,9 @@ subroutine compute_psinablapsi_dmft(paw_dmft, cg, cprj, kg, gprimd, dtset, &
    ' WARNING: pawtab%nabla_ij not available.',ch10,&
    '   Only the kinetic (plane-wave) part of momentum matrix elements will be computed.'
    call wrtout(std_out, msg)
-   write(msg,'(a)') '   To include PAW augmentation, set prtnabla>0 or call pawnabla_init.'
+   write(msg,'(3a)') &
+   '   The PAW augmentation correction is typically a few percent of the total',ch10,&
+   '   velocity matrix elements. To include it, set prtnabla>0 or call pawnabla_init.'
    call wrtout(std_out, msg)
  end if
 

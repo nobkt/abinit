@@ -222,7 +222,6 @@ subroutine compute_bubble_conductivity(optic, paw_dmft, green_imp, nboson, niw_v
  complex(dp) :: jmu_ab, jnu_cd, gbc, gda, contrib
  complex(dp), allocatable :: jmu_mat(:,:), jnu_mat(:,:)
  complex(dp), allocatable :: g_iw(:,:), g_iw_om(:,:)
- complex(dp), allocatable :: temp1(:,:), temp2(:,:)
  integer :: ndim_half
  logical :: do_spin_decomp
  character(len=2) :: spin_channel
@@ -260,6 +259,13 @@ subroutine compute_bubble_conductivity(optic, paw_dmft, green_imp, nboson, niw_v
  do_spin_decomp = (nspinor == 2)
  ndim_half = mbandc / 2  ! Half of mbandc for spin-up/down blocks in spinor basis
 
+ ! Validate that mbandc is even for spin decomposition
+ if (do_spin_decomp .and. mod(mbandc, 2) /= 0) then
+   write(msg,'(a,i6,a)') &
+   ' compute_bubble_conductivity: mbandc=', mbandc, ' is odd but nspinor=2.'
+   ABI_ERROR(msg)
+ end if
+
  ! Initialize
  optic%pi_bubble = czero
  optic%pi_bubble_sc = czero
@@ -271,8 +277,6 @@ subroutine compute_bubble_conductivity(optic, paw_dmft, green_imp, nboson, niw_v
  ABI_MALLOC(jnu_mat, (mbandc, mbandc))
  ABI_MALLOC(g_iw, (mbandc, mbandc))
  ABI_MALLOC(g_iw_om, (mbandc, mbandc))
- ABI_MALLOC(temp1, (mbandc, mbandc))
- ABI_MALLOC(temp2, (mbandc, mbandc))
 
  ! Main computation loop
  ! Pi_mu_nu(iOm) = -(1/(beta*Nk)) sum_k sum_n Tr[j_mu G(iw_n) j_nu G(iw_n+iOm)]
@@ -301,7 +305,11 @@ subroutine compute_bubble_conductivity(optic, paw_dmft, green_imp, nboson, niw_v
 
            ! Sum over fermionic Matsubara frequencies
            do iw = 1, niw_vertex
-             ! Check frequency bounds
+             ! Frequency index convention (1-based):
+             !   iw indexes fermionic frequency omega_n, n = iw-1
+             !   iom indexes bosonic frequency Omega_m, m = iom-1
+             !   Shifted index: iw + iom - 1 gives omega_n + Omega_m
+             !   Valid when iw + iom - 1 <= green_imp%nw
              if (iw + iom - 1 > green_imp%nw) cycle
 
              ! Extract G(k, iw_n) and G(k, iw_n + iOm_m)
@@ -383,8 +391,6 @@ subroutine compute_bubble_conductivity(optic, paw_dmft, green_imp, nboson, niw_v
  ABI_FREE(jnu_mat)
  ABI_FREE(g_iw)
  ABI_FREE(g_iw_om)
- ABI_FREE(temp1)
- ABI_FREE(temp2)
 
  write(msg,'(a)') ' compute_bubble_conductivity: Bubble computation complete.'
  call wrtout(std_out, msg)

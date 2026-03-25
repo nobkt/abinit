@@ -32,6 +32,7 @@ MODULE m_dmft_two_particle
  use m_errors
 
  use m_paw_dmft, only : paw_dmft_type
+ use m_green, only : green_type
 
  implicit none
 
@@ -163,58 +164,143 @@ end subroutine destroy_chi_loc
 !!  chi0_imp_{alpha,beta,gamma,delta}(iw_n, iw_n'; iOm_m)
 !!    = -beta * delta_{n,n'} * G^imp_{delta,alpha}(iw_n) * G^imp_{beta,gamma}(iw_n + iOm_m)
 !!
-!!  Following the Fourier convention of Section 5.9 of the design document.
+!!  Following the Fourier convention of Section 5.9 of the design document
+!!  (Rohringer et al., Rev. Mod. Phys. 90, 025003 (2018)).
+!!
+!!  The Green function is extracted from the converged green_type object,
+!!  which stores G^imp(iw_n) in the local basis (matlu) for each frequency.
 !!
 !! INPUTS
-!!  paw_dmft = DFT+DMFT data containing the converged impurity Green function
-!!  norb_corr = number of correlated spinor-orbitals
-!!  niw_vertex = number of fermionic Matsubara frequencies
+!!  green_imp = converged impurity Green function (green_type)
+!!  paw_dmft = DFT+DMFT data with system parameters (temperature, atom info)
+!!  norb_corr = number of correlated spinor-orbitals = (2*lpawu+1)*nspinor
+!!  niw_vertex = number of fermionic Matsubara frequencies for vertex
 !!  nboson = number of bosonic Matsubara frequencies
 !!
 !! SIDE EFFECTS
-!!  chi0 = on output, contains the computed bare bubble
+!!  chi0 = on output, contains the computed bare impurity bubble
 !!
 !! NOTES
-!!  Currently a skeleton implementation. The actual impurity Green function
-!!  extraction from paw_dmft requires connecting to the green_type data.
+!!  Requires nspinor=2 for spin-flip calculations (nsppol=1 in this case).
+!!  The frequency shift iw_n + iOm_m = iw_{n+m}, so we need
+!!  niw_vertex + nboson - 1 <= green_imp%nw.
 !!
 !! SOURCE
 
-subroutine compute_chi0_imp(chi0, paw_dmft, norb_corr, niw_vertex, nboson)
+subroutine compute_chi0_imp(chi0, green_imp, paw_dmft, norb_corr, niw_vertex, nboson)
 
  type(chi_loc_type), intent(inout) :: chi0
+ type(green_type), intent(in) :: green_imp
  type(paw_dmft_type), intent(in) :: paw_dmft
  integer, intent(in) :: norb_corr, niw_vertex, nboson
 
 !Local variables
- integer :: iom, iw, ialpha, ibeta, igamma, idelta
- integer :: idx_i, idx_j
+ integer :: iom, iw, iw_shifted, ialpha, ibeta, igamma, idelta
+ integer :: idx_i, idx_j, iatom, iatom_corr
+ integer :: norb_sq, ndim_matlu
+ real(dp) :: beta
+ complex(dp), allocatable :: gmat_n(:,:), gmat_np(:,:)
  character(len=500) :: msg
 
 ! *********************************************************************
 
- write(msg,'(a)') ' compute_chi0_imp: Computing bare impurity bubble'
+ write(msg,'(a)') ' compute_chi0_imp: Computing bare impurity bubble from Green function'
  call wrtout(std_out, msg)
 
- ! The bare bubble is diagonal in fermionic frequency: delta_{n,n'}
- ! chi0(iOm, I, J) where I=(alpha,beta,n), J=(gamma,delta,n')
- ! is nonzero only when n=n' in the I,J composite indices.
- !
- ! Formula: chi0_{ab,gd}(n,n';Om) = -beta * delta_{nn'} * G_{da}(iwn) * G_{bg}(iwn+iOm)
- !
- ! NOTE: Actual implementation requires extracting G^imp from paw_dmft.
- ! This is a structural skeleton that establishes the correct index layout.
- ! The Green function data connection will be completed when the TRIQS
- ! two-particle interface is available.
+ beta = one / paw_dmft%temp
+
+ ! --- Validate frequency bounds ---
+ ! Shifted frequency index: iw + (iom - 1) must not exceed green_imp%nw
+ if (niw_vertex + nboson - 1 > green_imp%nw) then
+   write(msg,'(a,i6,a,i6,a,i6)') &
+   'compute_chi0_imp: frequency bounds exceeded. niw_vertex=', niw_vertex, &
+   ' nboson=', nboson, ' but green has nw=', green_imp%nw
+   ABI_ERROR(msg)
+ end if
+
+ ! --- Find the first correlated atom ---
+ iatom_corr = 0
+ do iatom = 1, paw_dmft%natom
+   if (paw_dmft%lpawu(iatom) >= 0) then
+     iatom_corr = iatom
+     exit
+   end if
+ end do
+
+ if (iatom_corr == 0) then
+   ABI_ERROR('compute_chi0_imp: no correlated atom found (all lpawu < 0)')
+ end if
+
+ write(msg,'(a,i4,a,i2)') &
+ ' compute_chi0_imp: Using correlated atom ', iatom_corr, &
+ ' with lpawu=', paw_dmft%lpawu(iatom_corr)
+ call wrtout(std_out, msg)
+
+ ! --- Validate Green function data ---
+ if (green_imp%oper(1)%has_opermatlu /= 1) then
+   ABI_ERROR('compute_chi0_imp: Green function does not have matlu (local basis) data')
+ end if
+
+ ! Validate orbital dimension: matlu stores (2*lpawu+1)*nspinor x (2*lpawu+1)*nspinor
+ ndim_matlu = (2 * paw_dmft%lpawu(iatom_corr) + 1) * paw_dmft%nspinor
+ if (ndim_matlu /= norb_corr) then
+   write(msg,'(a,i4,a,i4)') &
+   'compute_chi0_imp: matlu dimension mismatch. ndim_matlu=', ndim_matlu, &
+   ' norb_corr=', norb_corr
+   ABI_ERROR(msg)
+ end if
+
+ norb_sq = norb_corr * norb_corr
+
+ ABI_MALLOC(gmat_n, (norb_corr, norb_corr))
+ ABI_MALLOC(gmat_np, (norb_corr, norb_corr))
 
  chi0%chi_mat = czero
 
- write(msg,'(a,i8,a)') &
- ' compute_chi0_imp: Bubble structure initialized (', chi0%ndim_comp, ' composite indices)'
+ write(msg,'(a,es14.6,a,i4,a,i4)') &
+ ' compute_chi0_imp: beta=', beta, ' niw_vertex=', niw_vertex, ' nboson=', nboson
  call wrtout(std_out, msg)
 
- write(msg,'(a)') &
- ' compute_chi0_imp: NOTE - Full G^imp connection pending TRIQS interface extension'
+ ! --- Compute chi0 ---
+ ! chi0_{ab,gd}(n,n';Om) = -beta * delta_{nn'} * G_{da}(iwn) * G_{bg}(iwn+iOm)
+ ! Packed index: I = (n-1)*norb^2 + (a-1)*norb + b  (1-based)
+ !
+ ! The bubble is block-diagonal in fermionic frequency (delta_{nn'}).
+ ! For each bosonic frequency iOm_m (m = iom-1, so iom=1 gives iOm_0=0):
+ !   shifted fermionic index = iw + (iom - 1)
+ !   i.e., iw_n + iOm_m = iw_{n + m}
+
+ do iom = 1, nboson
+   do iw = 1, niw_vertex
+     iw_shifted = iw + (iom - 1)
+
+     ! Extract G^imp matrices at iw_n and iw_n + iOm_m
+     ! For nspinor=2: nsppol=1, so isppol index is always 1
+     gmat_n(:,:) = green_imp%oper(iw)%matlu(iatom_corr)%mat(:,:,1)
+     gmat_np(:,:) = green_imp%oper(iw_shifted)%matlu(iatom_corr)%mat(:,:,1)
+
+     do ialpha = 1, norb_corr
+       do ibeta = 1, norb_corr
+         idx_i = (iw - 1) * norb_sq + (ialpha - 1) * norb_corr + ibeta
+         do igamma = 1, norb_corr
+           do idelta = 1, norb_corr
+             ! J uses the same frequency n as I due to delta_{nn'}
+             idx_j = (iw - 1) * norb_sq + (igamma - 1) * norb_corr + idelta
+             ! chi0 = -beta * G_{delta,alpha}(iwn) * G_{beta,gamma}(iwn+iOm)
+             chi0%chi_mat(iom, idx_i, idx_j) = &
+               -beta * gmat_n(idelta, ialpha) * gmat_np(ibeta, igamma)
+           end do
+         end do
+       end do
+     end do
+   end do
+ end do
+
+ ABI_FREE(gmat_n)
+ ABI_FREE(gmat_np)
+
+ write(msg,'(a,i8,a)') &
+ ' compute_chi0_imp: Bubble computed (', chi0%ndim_comp, ' composite indices)'
  call wrtout(std_out, msg)
 
 end subroutine compute_chi0_imp

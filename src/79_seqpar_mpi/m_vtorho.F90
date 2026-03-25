@@ -1548,7 +1548,7 @@ subroutine vtorho(afford,atindx,atindx1,cg,compch_fft,cprj,cpus,dbl_nnsclo,&
 !        ==  solve dmft loop
          call xmpi_barrier(spaceComm_distrb)
 
-         call dmft_solve(cryst_struc,istep,dft_occup,mpi_enreg,paw_dmft,pawang,pawtab(:),dtset%pawprtvol)
+         call dmft_solve(cryst_struc,dtset,istep,dft_occup,mpi_enreg,paw_dmft,pawang,pawtab(:),dtset%pawprtvol)
          edmft=paw_dmft%e_hu-paw_dmft%e_dc
          energies%e_dc=paw_dmft%e_dc
          energies%e_hu=paw_dmft%e_hu

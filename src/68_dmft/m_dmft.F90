@@ -36,6 +36,7 @@ MODULE m_dmft
  use m_errors
 
  use m_crystal, only : crystal_t
+ use m_dtset, only : dataset_type
  use m_datafordmft, only : chipsi_print,chipsi_renormalization,compute_wannier,print_wannier
  use m_dftu_self, only : dftu_self
  use m_energy, only : compute_dftu_energy,compute_energy,compute_free_energy,&
@@ -54,6 +55,7 @@ MODULE m_dmft
  use m_pawtab, only : pawtab_type
  use m_self, only : dc_self,destroy_self,initialize_self,new_self,print_self,rw_self,self_type
  use m_time, only : timab
+ use m_dmft_absorption_driver, only : dmft_absorption_run
 
 #ifdef HAVE_GPU_MARKERS
  use m_nvtx_data
@@ -95,11 +97,12 @@ contains
 !!
 !! SOURCE
 
-subroutine dmft_solve(cryst_struc,istep,dft_occup,mpi_enreg,paw_dmft,pawang,pawtab,pawprtvol)
+subroutine dmft_solve(cryst_struc,dtset,istep,dft_occup,mpi_enreg,paw_dmft,pawang,pawtab,pawprtvol)
 
 !Arguments ------------------------------------
  integer, intent(in) :: istep,pawprtvol
  type(MPI_type), intent(in) :: mpi_enreg
+ type(dataset_type), intent(in) :: dtset
  type(pawang_type), intent(in) :: pawang
  type(crystal_t), intent(in) :: cryst_struc
  type(paw_dmft_type), intent(inout)  :: paw_dmft
@@ -581,6 +584,13 @@ subroutine dmft_solve(cryst_struc,istep,dft_occup,mpi_enreg,paw_dmft,pawang,pawt
  if (paw_dmft%dmft_solv <= 2 .and. paw_dmft%prtdos >= 1) then
    call spectral_function(cryst_struc,green,hu(:),paw_dmft,pawtab(:),self,pawprtvol)
  end if
+
+!== DFT+DMFT response (absorption spectrum) calculation
+!   Called while the converged Green function is still available.
+ if (dtset%dmft_resp_mode > 0) then
+   call dmft_absorption_run(dtset, paw_dmft, cryst_struc, green)
+ end if
+
  call destroy_green(weiss)
  call destroy_green(green)
 !todo_ab rotate back density matrix into unnormalized basis just for

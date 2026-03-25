@@ -8,6 +8,7 @@ add_library(68_dmft STATIC
   m_dmft_absorption_driver.F90
   m_dmft_lattice_bse.F90
   m_dmft_optic_kernel.F90
+  m_dmft_spectral_attribution.F90
   m_dmft_spinor_proj.F90
   m_dmft_two_particle.F90
   m_dmft_vertex.F90

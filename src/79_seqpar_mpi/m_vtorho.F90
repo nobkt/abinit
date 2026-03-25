@@ -1553,7 +1553,7 @@ subroutine vtorho(afford,atindx,atindx1,cg,compch_fft,cprj,cpus,dbl_nnsclo,&
 !          pawnabla_init computes <phi_i|nabla|phi_j> - <tphi_i|nabla|tphi_j>
 !          which is needed for the PAW augmentation part of momentum matrix elements.
 !          Without this call, only the kinetic (plane-wave) part would be computed.
-           if (.not. all(pawtab(:)%has_nabla >= 2)) then
+           if (any(pawtab(:)%has_nabla < 2)) then
              call pawnabla_init(psps%mpsang, ntypat, pawrad, pawtab)
            end if
            call compute_psinablapsi_dmft(paw_dmft, cg(:,:), cprj(:,:), kg, gprimd, dtset, &

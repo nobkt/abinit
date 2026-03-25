@@ -49,6 +49,10 @@ MODULE m_dmft_lattice_bse
  public :: destroy_lattice_bse
  public :: compute_chi0_lattice
  public :: solve_lattice_bse
+ public :: kpoint_chi0_attrib_type
+ public :: init_kpoint_chi0_attrib
+ public :: destroy_kpoint_chi0_attrib
+ public :: write_kpoint_chi0_attrib
 
 !!***
 
@@ -76,6 +80,47 @@ MODULE m_dmft_lattice_bse
    ! chi_full(nboson, ndim_comp, ndim_comp) : full lattice susceptibility at q=0
 
  end type lattice_bse_type
+
+!!***
+
+!!****t* m_dmft_lattice_bse/kpoint_chi0_attrib_type
+!! NAME
+!!  kpoint_chi0_attrib_type
+!!
+!! FUNCTION
+!!  Stores k-point resolved spin-channel traces of the lattice bubble.
+!!
+!!  For each k-point and bosonic frequency, the susceptibility trace
+!!  is decomposed into spin channels:
+!!    chi0_k_total(iOm, ik) = -beta * wtk * sum_{n,a,b}
+!!                             G^loc_{ba}(k,iwn) G^loc_{ab}(k,iwn+iOm)
+!!    chi0_k_pm, chi0_k_mp, chi0_k_sc : spin-channel components
+!!
+!!  This enables identification of which k-points in the Brillouin zone
+!!  contribute most to spin-flip susceptibility.
+!!
+!! SOURCE
+
+ type, public :: kpoint_chi0_attrib_type
+
+   integer :: nboson = 0
+   integer :: nkpt = 0
+   integer :: ndim_orb = 0
+   integer :: nspinor = 0
+
+   complex(dp), allocatable :: chi0_k_total(:,:)
+   ! chi0_k_total(nboson, nkpt) : total trace per k-point
+
+   complex(dp), allocatable :: chi0_k_sc(:,:)
+   ! chi0_k_sc(nboson, nkpt) : spin-conserving trace per k-point
+
+   complex(dp), allocatable :: chi0_k_pm(:,:)
+   ! chi0_k_pm(nboson, nkpt) : S+S- trace per k-point
+
+   complex(dp), allocatable :: chi0_k_mp(:,:)
+   ! chi0_k_mp(nboson, nkpt) : S-S+ trace per k-point
+
+ end type kpoint_chi0_attrib_type
 
 !!***
 
@@ -203,7 +248,7 @@ end subroutine destroy_lattice_bse
 !! SOURCE
 
 subroutine compute_chi0_lattice(lbse, green_imp, paw_dmft, sproj, &
-  & norb_corr, niw_vertex, nboson, ladd)
+  & norb_corr, niw_vertex, nboson, ladd, kpt_attrib)
 
  type(lattice_bse_type), intent(inout) :: lbse
  type(green_type), intent(in) :: green_imp
@@ -213,14 +258,20 @@ subroutine compute_chi0_lattice(lbse, green_imp, paw_dmft, sproj, &
  logical, intent(in), optional :: ladd
    !! When .true., accumulate into chi0_latt instead of zeroing it first.
    !! Default is .false. (zero and compute from scratch).
+ type(kpoint_chi0_attrib_type), intent(inout), optional :: kpt_attrib
+   !! When present, per-k spin-channel traces are computed and accumulated.
+   !! Must be initialized before calling this routine.
+   !! If ladd=.true., existing values are preserved and accumulated into.
 
 !Local variables
  integer :: iom, iw, iw_shifted, ik, iw_max
  integer :: ialpha, ibeta, igamma, idelta
  integer :: norb_sq, idx_i, idx_j
  integer :: mbandc
- logical :: ladd_local
+ integer :: ispin_a, ispin_b, ndim_orb
+ logical :: ladd_local, do_kpt_attrib
  real(dp) :: beta, wk
+ complex(dp) :: bubble_contrib
  complex(dp), allocatable :: gloc_n(:,:), gloc_np(:,:)
  complex(dp), allocatable :: temp_mat(:,:), proj_k(:,:)
  character(len=500) :: msg
@@ -230,7 +281,11 @@ subroutine compute_chi0_lattice(lbse, green_imp, paw_dmft, sproj, &
  ladd_local = .false.
  if (present(ladd)) ladd_local = ladd
 
- write(msg,'(a,l2)') ' compute_chi0_lattice: Computing lattice bubble at q=0, accumulate=', ladd_local
+ do_kpt_attrib = present(kpt_attrib)
+ ndim_orb = norb_corr / paw_dmft%nspinor
+
+ write(msg,'(a,l2,a,l2)') ' compute_chi0_lattice: Computing lattice bubble at q=0, accumulate=', &
+   ladd_local, ' kpt_attrib=', do_kpt_attrib
  call wrtout(std_out, msg)
 
  ! --- Validate KS data availability across all needed frequencies ---
@@ -277,6 +332,12 @@ subroutine compute_chi0_lattice(lbse, green_imp, paw_dmft, sproj, &
 
  if (.not. ladd_local) then
    lbse%chi0_latt = czero
+   if (do_kpt_attrib) then
+     kpt_attrib%chi0_k_total = czero
+     kpt_attrib%chi0_k_sc = czero
+     kpt_attrib%chi0_k_pm = czero
+     kpt_attrib%chi0_k_mp = czero
+   end if
  end if
 
  ! --- Compute lattice bubble ---
@@ -337,6 +398,45 @@ subroutine compute_chi0_lattice(lbse, green_imp, paw_dmft, sproj, &
          end do
        end do
 
+
+        ! --- Per-k spin-channel trace attribution ---
+        ! Trace chi0_{ab,ba} = -beta * wk * G_{ba}(k,iw) * G_{ab}(k,iw+iOm)
+        ! Classified by spin channel of (alpha, beta).
+        if (do_kpt_attrib .and. paw_dmft%nspinor == 2) then
+          do ialpha = 1, norb_corr
+            do ibeta = 1, norb_corr
+              bubble_contrib = -beta * wk * gloc_n(ibeta, ialpha) * gloc_np(ialpha, ibeta)
+
+              ! Total trace
+              kpt_attrib%chi0_k_total(iom, ik) = &
+                kpt_attrib%chi0_k_total(iom, ik) + bubble_contrib
+
+              ! Determine spin indices
+              if (ialpha <= ndim_orb) then
+                ispin_a = 1
+              else
+                ispin_a = 2
+              end if
+              if (ibeta <= ndim_orb) then
+                ispin_b = 1
+              else
+                ispin_b = 2
+              end if
+
+              ! Classify by spin channel
+              if (ispin_a == ispin_b) then
+                kpt_attrib%chi0_k_sc(iom, ik) = &
+                  kpt_attrib%chi0_k_sc(iom, ik) + bubble_contrib
+              else if (ispin_a == 1 .and. ispin_b == 2) then
+                kpt_attrib%chi0_k_pm(iom, ik) = &
+                  kpt_attrib%chi0_k_pm(iom, ik) + bubble_contrib
+              else if (ispin_a == 2 .and. ispin_b == 1) then
+                kpt_attrib%chi0_k_mp(iom, ik) = &
+                  kpt_attrib%chi0_k_mp(iom, ik) + bubble_contrib
+              end if
+            end do
+          end do
+        end if
      end do  ! ik
    end do  ! iw
  end do  ! iom
@@ -430,6 +530,183 @@ subroutine solve_lattice_bse(lbse, vertex, norb_corr, niw_vertex, nboson)
  call wrtout(std_out, msg)
 
 end subroutine solve_lattice_bse
+
+!!***
+
+!!****f* m_dmft_lattice_bse/init_kpoint_chi0_attrib
+!! NAME
+!!  init_kpoint_chi0_attrib
+!!
+!! FUNCTION
+!!  Initialize the k-point resolved attribution structure.
+!!
+!! INPUTS
+!!  nboson = number of bosonic Matsubara frequencies
+!!  nkpt = number of k-points
+!!  ndim_orb = number of orbital indices (2*lpawu+1)
+!!  nspinor = number of spinor components
+!!
+!! SOURCE
+
+subroutine init_kpoint_chi0_attrib(kattr, nboson, nkpt, ndim_orb, nspinor)
+
+ type(kpoint_chi0_attrib_type), intent(inout) :: kattr
+ integer, intent(in) :: nboson, nkpt, ndim_orb, nspinor
+
+!Local variables
+ character(len=500) :: msg
+
+! *********************************************************************
+
+ kattr%nboson = nboson
+ kattr%nkpt = nkpt
+ kattr%ndim_orb = ndim_orb
+ kattr%nspinor = nspinor
+
+ write(msg,'(a,i4,a,i6,a,i4,a,i2)') &
+ ' init_kpoint_chi0_attrib: nboson=', nboson, ' nkpt=', nkpt, &
+ ' ndim_orb=', ndim_orb, ' nspinor=', nspinor
+ call wrtout(std_out, msg)
+
+ ABI_MALLOC(kattr%chi0_k_total, (nboson, nkpt))
+ ABI_MALLOC(kattr%chi0_k_sc, (nboson, nkpt))
+ ABI_MALLOC(kattr%chi0_k_pm, (nboson, nkpt))
+ ABI_MALLOC(kattr%chi0_k_mp, (nboson, nkpt))
+
+ kattr%chi0_k_total = czero
+ kattr%chi0_k_sc = czero
+ kattr%chi0_k_pm = czero
+ kattr%chi0_k_mp = czero
+
+end subroutine init_kpoint_chi0_attrib
+
+!!***
+
+!!****f* m_dmft_lattice_bse/destroy_kpoint_chi0_attrib
+!! NAME
+!!  destroy_kpoint_chi0_attrib
+!!
+!! FUNCTION
+!!  Deallocate the k-point resolved attribution structure.
+!!
+!! SOURCE
+
+subroutine destroy_kpoint_chi0_attrib(kattr)
+
+ type(kpoint_chi0_attrib_type), intent(inout) :: kattr
+
+! *********************************************************************
+
+ if (allocated(kattr%chi0_k_total)) then
+   ABI_FREE(kattr%chi0_k_total)
+ end if
+ if (allocated(kattr%chi0_k_sc)) then
+   ABI_FREE(kattr%chi0_k_sc)
+ end if
+ if (allocated(kattr%chi0_k_pm)) then
+   ABI_FREE(kattr%chi0_k_pm)
+ end if
+ if (allocated(kattr%chi0_k_mp)) then
+   ABI_FREE(kattr%chi0_k_mp)
+ end if
+
+ kattr%nboson = 0
+ kattr%nkpt = 0
+ kattr%ndim_orb = 0
+ kattr%nspinor = 0
+
+end subroutine destroy_kpoint_chi0_attrib
+
+!!***
+
+!!****f* m_dmft_lattice_bse/write_kpoint_chi0_attrib
+!! NAME
+!!  write_kpoint_chi0_attrib
+!!
+!! FUNCTION
+!!  Write k-point resolved lattice bubble attribution to file.
+!!
+!!  For each bosonic frequency, outputs the spin-channel trace
+!!  contribution from each k-point. This enables identification of
+!!  which regions of the Brillouin zone dominate the spin-flip
+!!  susceptibility.
+!!
+!! INPUTS
+!!  kattr = k-point resolved attribution data
+!!  paw_dmft = DFT+DMFT data (for k-point coordinates and weights)
+!!  fname = output file name
+!!  beta = inverse temperature
+!!
+!! SOURCE
+
+subroutine write_kpoint_chi0_attrib(kattr, paw_dmft, kpt_coords, fname, beta)
+
+ type(kpoint_chi0_attrib_type), intent(in) :: kattr
+ type(paw_dmft_type), intent(in) :: paw_dmft
+ real(dp), intent(in) :: kpt_coords(:,:)
+   !! kpt_coords(3, nkpt) : k-point coordinates in reduced coordinates
+ character(len=*), intent(in) :: fname
+ real(dp), intent(in) :: beta
+
+!Local variables
+ integer :: unt, iom, ik, ios
+ real(dp) :: omega_boson
+ character(len=500) :: msg
+
+! *********************************************************************
+
+ open(newunit=unt, file=fname, form='formatted', action='write', iostat=ios)
+ if (ios /= 0) then
+   write(msg,'(3a)') 'Cannot open file: ', trim(fname), ' for writing.'
+   ABI_ERROR(msg)
+ end if
+
+ write(unt,'(a)') '# DFT+DMFT k-point Resolved Lattice Bubble Attribution'
+ write(unt,'(a)') '# Spin-channel trace per k-point: chi0_{ab,ba}(iOm) contributions'
+ write(unt,'(a,i6)') '# nboson = ', kattr%nboson
+ write(unt,'(a,i6)') '# nkpt = ', kattr%nkpt
+ write(unt,'(a,i4)') '# ndim_orb = ', kattr%ndim_orb
+ write(unt,'(a,es14.6)') '# beta = ', beta
+ write(unt,'(a)')
+
+ ! --- Section 1: Per-k spin channel traces ---
+ write(unt,'(a)') '# === Section 1: Per-k spin channel traces ==='
+ write(unt,'(a)') '# iOm  ik  wtk  kx  ky  kz  Re(total)  Im(total)  ' // &
+   'Re(sc)  Im(sc)  Re(pm)  Im(pm)  Re(mp)  Im(mp)'
+
+ do iom = 1, kattr%nboson
+   omega_boson = two_pi * dble(iom - 1) / beta
+   do ik = 1, kattr%nkpt
+     write(unt,'(2i6,es12.4,3f10.5,8es18.8)') &
+       iom, ik, paw_dmft%wtk(ik), &
+       kpt_coords(1,ik), kpt_coords(2,ik), kpt_coords(3,ik), &
+       real(kattr%chi0_k_total(iom, ik)), aimag(kattr%chi0_k_total(iom, ik)), &
+       real(kattr%chi0_k_sc(iom, ik)), aimag(kattr%chi0_k_sc(iom, ik)), &
+       real(kattr%chi0_k_pm(iom, ik)), aimag(kattr%chi0_k_pm(iom, ik)), &
+       real(kattr%chi0_k_mp(iom, ik)), aimag(kattr%chi0_k_mp(iom, ik))
+   end do
+ end do
+
+ write(unt,'(a)')
+
+ ! --- Section 2: Summary — dominant k-points at static limit (iOm=0) ---
+ write(unt,'(a)') '# === Section 2: Dominant k-points for S+S- at iOm=0 ==='
+ write(unt,'(a)') '# ik  wtk  kx  ky  kz  |chi0_k_pm|  Re(chi0_k_pm)  Im(chi0_k_pm)'
+
+ do ik = 1, kattr%nkpt
+   write(unt,'(i6,es12.4,3f10.5,es16.6,2es18.8)') &
+     ik, paw_dmft%wtk(ik), &
+     kpt_coords(1,ik), kpt_coords(2,ik), kpt_coords(3,ik), &
+     abs(kattr%chi0_k_pm(1, ik)), &
+     real(kattr%chi0_k_pm(1, ik)), aimag(kattr%chi0_k_pm(1, ik))
+ end do
+
+ close(unt)
+
+ write(msg,'(3a)') ' write_kpoint_chi0_attrib: Written to ', trim(fname)
+ call wrtout(std_out, msg)
+
+end subroutine write_kpoint_chi0_attrib
 
 !!***
 

@@ -44,13 +44,15 @@ MODULE m_dmft_absorption_driver
  use m_dmft_vertex, only : vertex_irr_type, init_vertex_irr, destroy_vertex_irr, &
                           & extract_vertex_irr
  use m_dmft_lattice_bse, only : lattice_bse_type, init_lattice_bse, destroy_lattice_bse, &
-                               & compute_chi0_lattice, solve_lattice_bse
+                               & compute_chi0_lattice, solve_lattice_bse, &
+                               & kpoint_chi0_attrib_type, init_kpoint_chi0_attrib, &
+                               & destroy_kpoint_chi0_attrib, write_kpoint_chi0_attrib
  use m_dmft_optic_kernel, only : optic_kernel_type, init_optic_kernel, destroy_optic_kernel, &
                                 & compute_bubble_conductivity, write_optic_kernel
  use m_dmft_spectral_attribution, only : spectral_attribution_type, &
    & init_spectral_attribution, destroy_spectral_attribution, &
    & compute_spectral_attribution, write_spectral_attribution, &
-   & write_attribution_comparison
+   & write_attribution_comparison, write_attribution_summary
  use m_dmft_spinor_proj, only : spinor_proj_type, init_spinor_proj, destroy_spinor_proj, &
    & populate_from_chipsi, check_spinor_completeness
 
@@ -109,6 +111,7 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc, green_imp)
  type(spectral_attribution_type) :: attrib_imp
  type(spectral_attribution_type) :: attrib_latt
  type(spectral_attribution_type) :: attrib_bse
+ type(kpoint_chi0_attrib_type) :: kpt_attrib
  logical :: do_spinflip_attrib
  integer :: nboson, niw_vertex, norb_corr, resp_mode
  integer :: ndim_orb, iatom, ncorr_atoms, iatom_latt_count
@@ -234,6 +237,7 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc, green_imp)
    call init_spectral_attribution(attrib_imp, nboson, ndim_orb, paw_dmft%nspinor)
    call compute_spectral_attribution(attrib_imp, chi0_loc, paw_dmft%nspinor)
    call write_spectral_attribution(attrib_imp, 'DMFT_attrib_chi0_imp_total.dat', beta)
+    call write_attribution_summary(attrib_imp, 'DMFT_attrib_summary_imp.dat', beta)
    ! attrib_imp is kept alive for Stage 6 cross-level comparison
  end if
 
@@ -271,6 +275,11 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc, green_imp)
 
  call init_lattice_bse(latt_bse, norb_corr, niw_vertex, nboson, paw_dmft%nkpt)
  call init_spinor_proj(sproj, paw_dmft)
+
+ ! Initialize k-point resolved attribution if spin-flip attribution is active
+ if (do_spinflip_attrib) then
+   call init_kpoint_chi0_attrib(kpt_attrib, nboson, paw_dmft%nkpt, ndim_orb, paw_dmft%nspinor)
+ end if
 
  ! --- Multi-atom lattice bubble: loop over all correlated atoms ---
  ! Each atom contributes through its own spinor projectors P_atom(k).
@@ -310,9 +319,15 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc, green_imp)
    ! Compute lattice bubble contribution from this atom
    ! First atom: ladd=.false. (zeros chi0_latt then fills)
    ! Subsequent atoms: ladd=.true. (accumulates into existing chi0_latt)
-   call compute_chi0_lattice(lbse=latt_bse, green_imp=green_imp, paw_dmft=paw_dmft, &
-     & sproj=sproj, norb_corr=norb_corr, niw_vertex=niw_vertex, nboson=nboson, &
-     & ladd=(iatom_latt_count > 1))
+   if (do_spinflip_attrib) then
+     call compute_chi0_lattice(lbse=latt_bse, green_imp=green_imp, paw_dmft=paw_dmft, &
+       & sproj=sproj, norb_corr=norb_corr, niw_vertex=niw_vertex, nboson=nboson, &
+       & ladd=(iatom_latt_count > 1), kpt_attrib=kpt_attrib)
+   else
+     call compute_chi0_lattice(lbse=latt_bse, green_imp=green_imp, paw_dmft=paw_dmft, &
+       & sproj=sproj, norb_corr=norb_corr, niw_vertex=niw_vertex, nboson=nboson, &
+       & ladd=(iatom_latt_count > 1))
+   end if
 
  end do
 
@@ -330,6 +345,13 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc, green_imp)
  call write_chi_mat_as_chi_loc(latt_bse%chi0_latt, norb_corr, niw_vertex, nboson, &
    & 'DMFT_chi0_lattice.dat')
 
+ ! Write k-point resolved attribution of lattice bubble
+ if (do_spinflip_attrib) then
+   write(msg,'(a)') '   Stage 4a: k-point resolved attribution of lattice bubble'
+   call wrtout(std_out, msg)
+   call write_kpoint_chi0_attrib(kpt_attrib, paw_dmft, dtset%kpt, 'DMFT_attrib_chi0_kpoint.dat', beta)
+ end if
+
  ! Stage 4b: Spectral attribution of total lattice bubble — kept alive for comparison
  if (do_spinflip_attrib) then
    write(msg,'(a)') '   Stage 4b: Spectral attribution of lattice bubble chi0_latt'
@@ -341,6 +363,7 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc, green_imp)
    call compute_spectral_attribution(attrib_latt, chi0_atom, paw_dmft%nspinor)
    call destroy_chi_loc(chi0_atom)
    call write_spectral_attribution(attrib_latt, 'DMFT_attrib_chi0_lattice.dat', beta)
+    call write_attribution_summary(attrib_latt, 'DMFT_attrib_summary_latt.dat', beta)
    ! attrib_latt is kept alive for Stage 6 cross-level comparison
  end if
 
@@ -358,6 +381,7 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc, green_imp)
    call compute_spectral_attribution(attrib_bse, chi0_atom, paw_dmft%nspinor)
    call destroy_chi_loc(chi0_atom)
    call write_spectral_attribution(attrib_bse, 'DMFT_attrib_chi_full.dat', beta)
+    call write_attribution_summary(attrib_bse, 'DMFT_attrib_summary_bse.dat', beta)
    ! attrib_bse is kept alive for Stage 6 cross-level comparison
  end if
 
@@ -403,6 +427,7 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc, green_imp)
    call destroy_spectral_attribution(attrib_imp)
    call destroy_spectral_attribution(attrib_latt)
    call destroy_spectral_attribution(attrib_bse)
+    call destroy_kpoint_chi0_attrib(kpt_attrib)
  end if
  call destroy_spinor_proj(sproj)
  call destroy_lattice_bse(latt_bse)

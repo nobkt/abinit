@@ -57,6 +57,7 @@ MODULE m_dmft_spectral_attribution
  public :: compute_spectral_attribution
  public :: write_spectral_attribution
  public :: write_attribution_comparison
+ public :: write_attribution_summary
 
 !!***
 
@@ -620,6 +621,297 @@ subroutine write_attribution_comparison(attrib_imp, attrib_latt, attrib_bse, fna
  call wrtout(std_out, msg)
 
 end subroutine write_attribution_comparison
+
+!!***
+
+!!****f* m_dmft_spectral_attribution/write_attribution_summary
+!! NAME
+!!  write_attribution_summary
+!!
+!! FUNCTION
+!!  Write a physical interpretation summary of spectral attribution data.
+!!
+!!  Extracts directly physical quantities from the Matsubara-axis
+!!  attribution data:
+!!
+!!  1. Static susceptibilities chi(iOm=0) for each spin channel.
+!!     These are directly measurable (e.g., by neutron scattering for
+!!     the transverse channel).
+!!
+!!  2. Channel fractions: relative contribution of each spin channel
+!!     to the total static susceptibility.
+!!
+!!  3. Matsubara convergence diagnostics: ratio of the highest-frequency
+!!     value to the static value. If this ratio is not small, the
+!!     Matsubara frequency grid is insufficient and results are unreliable.
+!!
+!!  4. Dominant orbital pairs in the S+S- channel at the static limit,
+!!     sorted by magnitude. This directly identifies which d-orbital
+!!     transitions dominate the spin-flip susceptibility.
+!!
+!! INPUTS
+!!  attrib = spectral attribution data (must be computed beforehand)
+!!  fname = output file name
+!!  beta = inverse temperature
+!!
+!! NOTES
+!!  No heuristic processing is performed. All quantities are exact
+!!  within the approximation level used to compute the attribution.
+!!  The convergence diagnostic is an assessment, not a correction.
+!!
+!! SOURCE
+
+subroutine write_attribution_summary(attrib, fname, beta)
+
+ type(spectral_attribution_type), intent(in) :: attrib
+ character(len=*), intent(in) :: fname
+ real(dp), intent(in) :: beta
+
+!Local variables
+ integer :: unt, ios, im, imp, nboson, ndim_orb
+ integer :: irank, npairs, ii, jj
+ integer :: tmp_m, tmp_mp
+ real(dp) :: omega_last
+ real(dp) :: abs_total_0, abs_pm_0, abs_mp_0, abs_sc_0
+ real(dp) :: abs_total_last, abs_pm_last, abs_mp_last, abs_sc_last
+ real(dp) :: ratio_conv, tmp_val
+ complex(dp) :: chi_static_total, chi_static_pm, chi_static_mp, chi_static_sc
+ character(len=500) :: msg
+ integer, allocatable :: rank_m(:), rank_mp(:)
+ real(dp), allocatable :: rank_val(:)
+
+! *********************************************************************
+
+ nboson = attrib%nboson
+ ndim_orb = attrib%ndim_orb
+
+ open(newunit=unt, file=fname, form='formatted', action='write', iostat=ios)
+ if (ios /= 0) then
+   write(msg,'(3a)') 'Cannot open file: ', trim(fname), ' for writing.'
+   ABI_ERROR(msg)
+ end if
+
+ write(unt,'(a)') '# DFT+DMFT Attribution Summary — Physical Quantity Extraction'
+ write(unt,'(a)') '# All quantities are exact on the Matsubara axis (no heuristics applied).'
+ write(unt,'(a,es14.6)') '# beta (inverse temperature) = ', beta
+ write(unt,'(a,es14.6)') '# T (temperature in Ha) = ', one/beta
+ write(unt,'(a,i6)') '# nboson = ', nboson
+ write(unt,'(a,i4)') '# ndim_orb = ', ndim_orb
+ write(unt,'(a)')
+
+ ! --- Section 1: Static susceptibilities chi(iOm=0) ---
+ ! iOm=0 corresponds to iom=1 (the first bosonic frequency)
+ write(unt,'(a)') '# ================================================================='
+ write(unt,'(a)') '# Section 1: Static susceptibilities chi(iOm=0)'
+ write(unt,'(a)') '# ================================================================='
+ write(unt,'(a)') '# These are the zero-frequency (static) limits of each channel.'
+ write(unt,'(a)') '# chi_total = chi_sc + chi_pm + chi_mp must hold exactly.'
+ write(unt,'(a)')
+
+ chi_static_total = attrib%chi_total(1)
+ chi_static_sc = attrib%chi_spin_conserving(1)
+ chi_static_pm = attrib%chi_spin_flip_pm(1)
+ chi_static_mp = attrib%chi_spin_flip_mp(1)
+
+ write(unt,'(a,2es22.12)') '# chi_total(0)           Re,Im = ', &
+   real(chi_static_total), aimag(chi_static_total)
+ write(unt,'(a,2es22.12)') '# chi_spin_conserving(0) Re,Im = ', &
+   real(chi_static_sc), aimag(chi_static_sc)
+ write(unt,'(a,2es22.12)') '# chi_S+S-(0)            Re,Im = ', &
+   real(chi_static_pm), aimag(chi_static_pm)
+ write(unt,'(a,2es22.12)') '# chi_S-S+(0)            Re,Im = ', &
+   real(chi_static_mp), aimag(chi_static_mp)
+
+ ! Verify sum rule: total = sc + pm + mp
+ write(unt,'(a,2es22.12)') '# sum_check (sc+pm+mp)   Re,Im = ', &
+   real(chi_static_sc + chi_static_pm + chi_static_mp), &
+   aimag(chi_static_sc + chi_static_pm + chi_static_mp)
+ write(unt,'(a,2es22.12)') '# difference (total-sum) Re,Im = ', &
+   real(chi_static_total - chi_static_sc - chi_static_pm - chi_static_mp), &
+   aimag(chi_static_total - chi_static_sc - chi_static_pm - chi_static_mp)
+ write(unt,'(a)')
+
+ ! --- Section 2: Channel fractions at static limit ---
+ write(unt,'(a)') '# ================================================================='
+ write(unt,'(a)') '# Section 2: Channel fractions at static limit'
+ write(unt,'(a)') '# ================================================================='
+
+ abs_total_0 = abs(chi_static_total)
+ abs_sc_0 = abs(chi_static_sc)
+ abs_pm_0 = abs(chi_static_pm)
+ abs_mp_0 = abs(chi_static_mp)
+
+ if (abs_total_0 > tol14) then
+   write(unt,'(a,es14.6)') '# |chi_sc(0)| / |chi_total(0)|  = ', abs_sc_0/abs_total_0
+   write(unt,'(a,es14.6)') '# |chi_pm(0)| / |chi_total(0)|  = ', abs_pm_0/abs_total_0
+   write(unt,'(a,es14.6)') '# |chi_mp(0)| / |chi_total(0)|  = ', abs_mp_0/abs_total_0
+   write(unt,'(a)') '#'
+   write(unt,'(a)') '# Interpretation:'
+   write(unt,'(a)') '#   Large chi_pm fraction -> spin-flip excitations are significant'
+   write(unt,'(a)') '#   chi_pm ~ chi_mp -> time-reversal symmetry approximately holds'
+ else
+   write(unt,'(a)') '# chi_total(0) is zero or negligible. Channel fractions undefined.'
+   write(unt,'(a)') '# This may indicate: (1) system has no susceptibility at this level,'
+   write(unt,'(a)') '# or (2) cancellation between channels.'
+ end if
+ write(unt,'(a)')
+
+ ! --- Section 3: Matsubara convergence diagnostics ---
+ write(unt,'(a)') '# ================================================================='
+ write(unt,'(a)') '# Section 3: Matsubara convergence diagnostics'
+ write(unt,'(a)') '# ================================================================='
+ write(unt,'(a)') '# Compares the magnitude at the highest bosonic frequency to the static'
+ write(unt,'(a)') '# value. A large ratio indicates insufficient number of bosonic frequencies.'
+
+ if (nboson > 1) then
+   omega_last = two_pi * dble(nboson - 1) / beta
+
+   abs_total_last = abs(attrib%chi_total(nboson))
+   abs_pm_last = abs(attrib%chi_spin_flip_pm(nboson))
+   abs_mp_last = abs(attrib%chi_spin_flip_mp(nboson))
+   abs_sc_last = abs(attrib%chi_spin_conserving(nboson))
+
+   write(unt,'(a,es14.6)') '# Highest bosonic Matsubara frequency = ', omega_last
+   write(unt,'(a)')
+   write(unt,'(a)') '# Channel            |chi(0)|         |chi(max)|       ratio'
+
+   if (abs_total_0 > tol14) then
+     ratio_conv = abs_total_last / abs_total_0
+     write(unt,'(a,3es16.6)') '# total           ', abs_total_0, abs_total_last, ratio_conv
+   else
+     write(unt,'(a,3es16.6)') '# total           ', abs_total_0, abs_total_last, zero
+   end if
+
+   if (abs_sc_0 > tol14) then
+     write(unt,'(a,3es16.6)') '# spin-conserving ', abs_sc_0, abs_sc_last, abs_sc_last/abs_sc_0
+   else
+     write(unt,'(a,3es16.6)') '# spin-conserving ', abs_sc_0, abs_sc_last, zero
+   end if
+
+   if (abs_pm_0 > tol14) then
+     write(unt,'(a,3es16.6)') '# S+S-            ', abs_pm_0, abs_pm_last, abs_pm_last/abs_pm_0
+   else
+     write(unt,'(a,3es16.6)') '# S+S-            ', abs_pm_0, abs_pm_last, zero
+   end if
+
+   if (abs_mp_0 > tol14) then
+     write(unt,'(a,3es16.6)') '# S-S+            ', abs_mp_0, abs_mp_last, abs_mp_last/abs_mp_0
+   else
+     write(unt,'(a,3es16.6)') '# S-S+            ', abs_mp_0, abs_mp_last, zero
+   end if
+
+   write(unt,'(a)')
+   if (abs_total_0 > tol14) then
+     ratio_conv = abs_total_last / abs_total_0
+     if (ratio_conv > 0.01_dp) then
+       write(unt,'(a)') '# WARNING: total ratio > 0.01. Matsubara summation may NOT be converged.'
+       write(unt,'(a)') '#          Consider increasing dmft_resp_nboson.'
+     else
+       write(unt,'(a)') '# Matsubara convergence appears satisfactory (total ratio < 0.01).'
+     end if
+   end if
+ else
+   write(unt,'(a)') '# Only 1 bosonic frequency; convergence cannot be assessed.'
+   write(unt,'(a)') '# At minimum 2 bosonic frequencies are needed for diagnostics.'
+ end if
+ write(unt,'(a)')
+
+ ! --- Section 4: Dominant orbital pairs in S+S- channel at static limit ---
+ write(unt,'(a)') '# ================================================================='
+ write(unt,'(a)') '# Section 4: Dominant orbital pairs in S+S- at iOm=0'
+ write(unt,'(a)') '# ================================================================='
+ write(unt,'(a)') '# Orbital pairs (m, m_prime) sorted by |chi^{+-}_{mm_prime}(0)|.'
+ write(unt,'(a)') '# Large values identify the d-orbital transitions that dominate'
+ write(unt,'(a)') '# the spin-flip susceptibility.'
+ write(unt,'(a)') '#'
+ write(unt,'(a)') '# Rank   m   m_prime   |chi_pm|        Re(chi_pm)         Im(chi_pm)'
+
+ npairs = ndim_orb * ndim_orb
+ ABI_MALLOC(rank_m, (npairs))
+ ABI_MALLOC(rank_mp, (npairs))
+ ABI_MALLOC(rank_val, (npairs))
+
+ irank = 0
+ do im = 1, ndim_orb
+   do imp = 1, ndim_orb
+     irank = irank + 1
+     rank_m(irank) = im
+     rank_mp(irank) = imp
+     rank_val(irank) = abs(attrib%chi_pm_orbital(1, im, imp))
+   end do
+ end do
+
+ ! Sort by magnitude in descending order (insertion sort; npairs is small)
+ do ii = 1, npairs - 1
+   do jj = ii + 1, npairs
+     if (rank_val(jj) > rank_val(ii)) then
+       tmp_val = rank_val(ii); rank_val(ii) = rank_val(jj); rank_val(jj) = tmp_val
+       tmp_m = rank_m(ii); rank_m(ii) = rank_m(jj); rank_m(jj) = tmp_m
+       tmp_mp = rank_mp(ii); rank_mp(ii) = rank_mp(jj); rank_mp(jj) = tmp_mp
+     end if
+   end do
+ end do
+
+ do irank = 1, npairs
+   write(unt,'(i6,2i6,es16.6,2es20.10)') irank, rank_m(irank), rank_mp(irank), &
+     rank_val(irank), &
+     real(attrib%chi_pm_orbital(1, rank_m(irank), rank_mp(irank))), &
+     aimag(attrib%chi_pm_orbital(1, rank_m(irank), rank_mp(irank)))
+ end do
+
+ ABI_FREE(rank_m)
+ ABI_FREE(rank_mp)
+ ABI_FREE(rank_val)
+
+ write(unt,'(a)')
+
+ ! --- Section 5: Dominant orbital pairs in S-S+ channel at static limit ---
+ write(unt,'(a)') '# ================================================================='
+ write(unt,'(a)') '# Section 5: Dominant orbital pairs in S-S+ at iOm=0'
+ write(unt,'(a)') '# ================================================================='
+ write(unt,'(a)') '# Rank   m   m_prime   |chi_mp|        Re(chi_mp)         Im(chi_mp)'
+
+ ABI_MALLOC(rank_m, (npairs))
+ ABI_MALLOC(rank_mp, (npairs))
+ ABI_MALLOC(rank_val, (npairs))
+
+ irank = 0
+ do im = 1, ndim_orb
+   do imp = 1, ndim_orb
+     irank = irank + 1
+     rank_m(irank) = im
+     rank_mp(irank) = imp
+     rank_val(irank) = abs(attrib%chi_mp_orbital(1, im, imp))
+   end do
+ end do
+
+ do ii = 1, npairs - 1
+   do jj = ii + 1, npairs
+     if (rank_val(jj) > rank_val(ii)) then
+       tmp_val = rank_val(ii); rank_val(ii) = rank_val(jj); rank_val(jj) = tmp_val
+       tmp_m = rank_m(ii); rank_m(ii) = rank_m(jj); rank_m(jj) = tmp_m
+       tmp_mp = rank_mp(ii); rank_mp(ii) = rank_mp(jj); rank_mp(jj) = tmp_mp
+     end if
+   end do
+ end do
+
+ do irank = 1, npairs
+   write(unt,'(i6,2i6,es16.6,2es20.10)') irank, rank_m(irank), rank_mp(irank), &
+     rank_val(irank), &
+     real(attrib%chi_mp_orbital(1, rank_m(irank), rank_mp(irank))), &
+     aimag(attrib%chi_mp_orbital(1, rank_m(irank), rank_mp(irank)))
+ end do
+
+ ABI_FREE(rank_m)
+ ABI_FREE(rank_mp)
+ ABI_FREE(rank_val)
+
+ close(unt)
+
+ write(msg,'(3a)') ' write_attribution_summary: Written to ', trim(fname)
+ call wrtout(std_out, msg)
+
+end subroutine write_attribution_summary
 
 !!***
 

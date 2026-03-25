@@ -1549,7 +1549,8 @@ subroutine vtorho(afford,atindx,atindx1,cg,compch_fft,cprj,cpus,dbl_nnsclo,&
 !        == compute momentum matrix elements for DMFT optical response
          if (dtset%dmft_resp_mode > 0) then
            call compute_psinablapsi_dmft(paw_dmft, cg(:,:), cprj(:,:), kg, gprimd, dtset, &
-             & pawtab(:), gs_hamk%dimcprj(:), mcg, mband_cprj, my_nspinor, usecprj_local)
+             & pawtab(:), cryst_struc, gs_hamk%dimcprj(:), mcg, mband_cprj, my_nspinor, &
+             & usecprj_local, mpi_enreg%comm_kpt, mpi_enreg%proc_distrb)
          end if
 
 !        ==  solve dmft loop

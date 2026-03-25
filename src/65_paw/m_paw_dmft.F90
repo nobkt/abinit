@@ -641,6 +641,22 @@ MODULE m_paw_dmft
   !  Coeffs of the transformation of real spherical
   !  harmonics under the symmetry operations symrec.
 
+  integer :: has_psinablapsi_dmft = 0
+  ! = 0: psinablapsi_dmft not computed
+  ! = 1: psinablapsi_dmft computed (kinetic + PAW augmentation)
+
+  real(dp), allocatable :: psinablapsi_dmft(:,:,:,:,:,:)
+  ! Momentum matrix elements <psi_a|-i nabla_mu|psi_b> for correlated bands.
+  ! Dimensions: (2, 3, mbandc, mbandc, nkpt, nsppol)
+  !   1st dim: real(1)/imaginary(2) parts
+  !   2nd dim: Cartesian direction mu (x=1, y=2, z=3)
+  !   3rd dim: band index a in correlated window [dmftbandi, dmftbandf]
+  !   4th dim: band index b in correlated window [dmftbandi, dmftbandf]
+  !   5th dim: k-point index (1:nkpt)
+  !   6th dim: spin polarization (1:nsppol)
+  ! These are used to compute the optical conductivity bubble
+  ! Pi_mu_nu = -(1/beta*Nk) sum_{k,n} Tr[j_mu G j_nu G]
+
   integer, ABI_CONTIGUOUS pointer :: dmft_nominal(:) => null()
   ! Only relevant when dmft_dc=7. Nominal occupancies for each atom.
 
@@ -2190,6 +2206,7 @@ subroutine destroy_dmft(paw_dmft)
  ABI_SFREE(paw_dmft%eigen_dft)
  ABI_SFREE(paw_dmft%omega_r)
  ABI_SFREE(paw_dmft%symrec_cart)
+ ABI_SFREE(paw_dmft%psinablapsi_dmft)
  paw_dmft%eigen => null()
  paw_dmft%fixed_self => null()
  paw_dmft%indsym => null()

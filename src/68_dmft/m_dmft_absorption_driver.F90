@@ -397,7 +397,8 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc, green_imp)
    call wrtout(std_out, msg)
 
    call init_optic_kernel(optic_kern, nboson, 3)
-   call compute_bubble_conductivity(optic_kern, paw_dmft, nboson)
+   call compute_bubble_conductivity(optic_kern, paw_dmft, green_imp, nboson, niw_vertex, &
+     & paw_dmft%nspinor)
 
    ! Write optical kernel output
    call write_optic_kernel(optic_kern, 'DMFT_optic_kernel.dat', beta)

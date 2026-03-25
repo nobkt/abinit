@@ -85,6 +85,7 @@ module m_vtorho
  use m_common,             only : prteigrs,get_gemm_nonlop_ompgpu_blocksize
  use m_dmft,               only : dmft_solve
  use m_datafordmft,        only : datafordmft
+ use m_dmft_current_vertex, only : compute_psinablapsi_dmft
  use m_fourier_interpol,   only : transgrid
  use m_cgprj,              only : ctocprj
  use m_wvl_rho,            only : wvl_mkrho
@@ -1544,6 +1545,12 @@ subroutine vtorho(afford,atindx,atindx1,cg,compch_fft,cprj,cpus,dbl_nnsclo,&
 
          call timab(620,2,tsec)
          call flush_unit(std_out)
+
+!        == compute momentum matrix elements for DMFT optical response
+         if (dtset%dmft_resp_mode > 0) then
+           call compute_psinablapsi_dmft(paw_dmft, cg(:,:), cprj(:,:), kg, gprimd, dtset, &
+             & pawtab(:), gs_hamk%dimcprj(:), mcg, mband_cprj, my_nspinor, usecprj_local)
+         end if
 
 !        ==  solve dmft loop
          call xmpi_barrier(spaceComm_distrb)

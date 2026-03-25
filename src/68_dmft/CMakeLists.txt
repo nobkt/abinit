@@ -6,6 +6,7 @@ add_library(68_dmft STATIC
   m_dftu_self.F90
   m_dmft.F90
   m_dmft_absorption_driver.F90
+  m_dmft_current_vertex.F90
   m_dmft_lattice_bse.F90
   m_dmft_optic_kernel.F90
   m_dmft_spectral_attribution.F90

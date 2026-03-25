@@ -86,8 +86,9 @@ CONTAINS
 !!
 !! FUNCTION
 !!  Initialize spinor projectors from the DFT+DMFT data.
-!!  Extracts and reorganizes the chipsi projections from paw_dmft_type
-!!  into a spinor-indexed format suitable for response calculations.
+!!  Allocates the projector array and sets dimensions from paw_dmft.
+!!  Actual population of projector values from chipsi is pending
+!!  (requires chipsi-to-composite-index mapping not yet implemented).
 !!
 !! INPUTS
 !!  paw_dmft = DFT+DMFT data with chipsi projections

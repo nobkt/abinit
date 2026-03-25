@@ -150,6 +150,12 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc)
  ! chi_loc%chi_mat would be filled by the TRIQS interface extension
  ! For now, chi_loc remains zero (placeholder for future TRIQS integration)
 
+ ! Warn user that two-particle data is not yet available
+ write(msg,'(3a)') &
+ ' WARNING: chi_loc is zero (TRIQS two-particle interface not connected).',ch10,&
+ ' Vertex extraction and BSE results will be trivial until this is implemented.'
+ call wrtout(std_out, msg)
+
  ! --- Stage 3: Extract irreducible vertex ---
  write(msg,'(a)') ' Stage 3: Extracting local irreducible vertex Gamma_imp'
  call wrtout(std_out, msg)

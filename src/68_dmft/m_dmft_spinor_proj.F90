@@ -42,6 +42,7 @@ MODULE m_dmft_spinor_proj
  public :: spinor_proj_type
  public :: init_spinor_proj
  public :: destroy_spinor_proj
+ public :: populate_from_chipsi
  public :: check_spinor_completeness
 
 !!***
@@ -143,6 +144,105 @@ subroutine init_spinor_proj(sproj, paw_dmft)
  call wrtout(std_out, msg)
 
 end subroutine init_spinor_proj
+
+!!***
+
+!!****f* m_dmft_spinor_proj/populate_from_chipsi
+!! NAME
+!!  populate_from_chipsi
+!!
+!! FUNCTION
+!!  Populate the spinor projector array from paw_dmft%chipsi.
+!!
+!!  chipsi has dimensions:
+!!    chipsi(nspinor*(2*maxlpawu+1), mbandc, nkpt, nsppol, natom)
+!!
+!!  For nspinor=2, nsppol=1 (required for spin-flip calculations),
+!!  the first dimension of chipsi already contains the composite
+!!  spinor-orbital index alpha = (m, sigma), with the same ordering
+!!  as used by matlu%mat.
+!!
+!!  This routine copies chipsi(:,:,:,1,iatom) into sproj%proj(:,:,:)
+!!  for a single correlated atom.
+!!
+!! INPUTS
+!!  paw_dmft = DFT+DMFT data with chipsi projections
+!!  iatom = atom index for which to populate projectors
+!!
+!! SIDE EFFECTS
+!!  sproj = on output, proj array contains the chipsi data
+!!
+!! NOTES
+!!  The atom must have lpawu >= 0 (correlated atom).
+!!  For nspinor=2, nsppol must be 1.
+!!  The ordering of the composite index in chipsi is assumed to match
+!!  the matlu convention: the same index ordering that defines
+!!  G^loc in green%oper(iw)%matlu(iatom)%mat.
+!!
+!! SOURCE
+
+subroutine populate_from_chipsi(sproj, paw_dmft, iatom)
+
+ type(spinor_proj_type), intent(inout) :: sproj
+ type(paw_dmft_type), intent(in) :: paw_dmft
+ integer, intent(in) :: iatom
+
+!Local variables
+ integer :: norb_corr_atom, ialpha, ib, ik
+ character(len=500) :: msg
+
+! *********************************************************************
+
+ if (iatom < 1 .or. iatom > paw_dmft%natom) then
+   write(msg,'(a,i4,a,i4)') &
+   'populate_from_chipsi: iatom=', iatom, ' out of range [1,', paw_dmft%natom
+   ABI_ERROR(trim(msg)//']')
+ end if
+
+ if (paw_dmft%lpawu(iatom) < 0) then
+   write(msg,'(a,i4,a)') &
+   'populate_from_chipsi: atom ', iatom, ' is not correlated (lpawu < 0)'
+   ABI_ERROR(msg)
+ end if
+
+ if (paw_dmft%nspinor == 2 .and. paw_dmft%nsppol /= 1) then
+   ABI_ERROR('populate_from_chipsi: nspinor=2 requires nsppol=1')
+ end if
+
+ ! Validate dimension consistency
+ norb_corr_atom = paw_dmft%nspinor * (2 * paw_dmft%lpawu(iatom) + 1)
+ if (norb_corr_atom /= sproj%norb_corr) then
+   write(msg,'(a,i4,a,i4)') &
+   'populate_from_chipsi: dimension mismatch. atom norb_corr=', norb_corr_atom, &
+   ' but sproj%norb_corr=', sproj%norb_corr
+   ABI_ERROR(msg)
+ end if
+
+ if (.not. allocated(paw_dmft%chipsi)) then
+   ABI_ERROR('populate_from_chipsi: paw_dmft%chipsi is not allocated')
+ end if
+
+ write(msg,'(a,i4,a,i4,a,i4)') &
+ ' populate_from_chipsi: atom=', iatom, ' norb_corr=', norb_corr_atom, &
+ ' nband_ks=', sproj%nband_ks
+ call wrtout(std_out, msg)
+
+ ! Copy chipsi to sproj%proj
+ ! chipsi(alpha, band, kpt, isppol, iatom) -> proj(alpha, band, kpt)
+ ! For nspinor=2, nsppol=1: isppol index is always 1
+ do ik = 1, sproj%nkpt
+   do ib = 1, sproj%nband_ks
+     do ialpha = 1, sproj%norb_corr
+       sproj%proj(ialpha, ib, ik) = paw_dmft%chipsi(ialpha, ib, ik, 1, iatom)
+     end do
+   end do
+ end do
+
+ write(msg,'(a,i4)') &
+ ' populate_from_chipsi: Projectors populated for atom ', iatom
+ call wrtout(std_out, msg)
+
+end subroutine populate_from_chipsi
 
 !!***
 

@@ -176,6 +176,9 @@ end subroutine destroy_chi_loc
 !!  norb_corr = number of correlated spinor-orbitals = (2*lpawu+1)*nspinor
 !!  niw_vertex = number of fermionic Matsubara frequencies for vertex
 !!  nboson = number of bosonic Matsubara frequencies
+!!  iatom_index = (optional) index of the correlated atom to use.
+!!    If not provided, the first correlated atom is used.
+!!    Must be a valid atom index with lpawu >= 0.
 !!
 !! SIDE EFFECTS
 !!  chi0 = on output, contains the computed bare impurity bubble
@@ -187,12 +190,14 @@ end subroutine destroy_chi_loc
 !!
 !! SOURCE
 
-subroutine compute_chi0_imp(chi0, green_imp, paw_dmft, norb_corr, niw_vertex, nboson)
+subroutine compute_chi0_imp(chi0, green_imp, paw_dmft, norb_corr, niw_vertex, nboson, &
+  & iatom_index)
 
  type(chi_loc_type), intent(inout) :: chi0
  type(green_type), intent(in) :: green_imp
  type(paw_dmft_type), intent(in) :: paw_dmft
  integer, intent(in) :: norb_corr, niw_vertex, nboson
+ integer, intent(in), optional :: iatom_index
 
 !Local variables
  integer :: iom, iw, iw_shifted, ialpha, ibeta, igamma, idelta
@@ -218,17 +223,31 @@ subroutine compute_chi0_imp(chi0, green_imp, paw_dmft, norb_corr, niw_vertex, nb
    ABI_ERROR(msg)
  end if
 
- ! --- Find the first correlated atom ---
- iatom_corr = 0
- do iatom = 1, paw_dmft%natom
-   if (paw_dmft%lpawu(iatom) >= 0) then
-     iatom_corr = iatom
-     exit
+ ! --- Determine which correlated atom to use ---
+ if (present(iatom_index)) then
+   iatom_corr = iatom_index
+   if (iatom_corr < 1 .or. iatom_corr > paw_dmft%natom) then
+     write(msg,'(a,i4,a,i4)') &
+     'compute_chi0_imp: iatom_index=', iatom_corr, ' out of range [1,', paw_dmft%natom
+     ABI_ERROR(trim(msg)//']')
    end if
- end do
-
- if (iatom_corr == 0) then
-   ABI_ERROR('compute_chi0_imp: no correlated atom found (no atoms with lpawu >= 0)')
+   if (paw_dmft%lpawu(iatom_corr) < 0) then
+     write(msg,'(a,i4,a)') &
+     'compute_chi0_imp: atom ', iatom_corr, ' is not correlated (lpawu < 0)'
+     ABI_ERROR(msg)
+   end if
+ else
+   ! Find the first correlated atom
+   iatom_corr = 0
+   do iatom = 1, paw_dmft%natom
+     if (paw_dmft%lpawu(iatom) >= 0) then
+       iatom_corr = iatom
+       exit
+     end if
+   end do
+   if (iatom_corr == 0) then
+     ABI_ERROR('compute_chi0_imp: no correlated atom found (no atoms with lpawu >= 0)')
+   end if
  end if
 
  write(msg,'(a,i4,a,i2)') &

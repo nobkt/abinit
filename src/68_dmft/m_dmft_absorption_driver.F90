@@ -50,6 +50,8 @@ MODULE m_dmft_absorption_driver
  use m_dmft_spectral_attribution, only : spectral_attribution_type, &
    & init_spectral_attribution, destroy_spectral_attribution, &
    & compute_spectral_attribution, write_spectral_attribution
+ use m_dmft_spinor_proj, only : spinor_proj_type, init_spinor_proj, destroy_spinor_proj, &
+   & populate_from_chipsi, check_spinor_completeness
 
  implicit none
 
@@ -94,14 +96,17 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc, green_imp)
 
 !Local variables
  character(len=500) :: msg
+ character(len=fnlen) :: fname
  type(chi_loc_type) :: chi_loc
  type(chi_loc_type) :: chi0_loc
+ type(chi_loc_type) :: chi0_atom
  type(vertex_irr_type) :: vertex_irr
  type(lattice_bse_type) :: latt_bse
  type(optic_kernel_type) :: optic_kern
- type(spectral_attribution_type) :: attrib_chi0, attrib_chi
+ type(spinor_proj_type) :: sproj
+ type(spectral_attribution_type) :: attrib_tmp
  integer :: nboson, niw_vertex, norb_corr, resp_mode
- integer :: ndim_orb
+ integer :: ndim_orb, iatom, ncorr_atoms
  real(dp) :: beta
 
 ! *********************************************************************
@@ -141,33 +146,77 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc, green_imp)
  ndim_orb = 2 * paw_dmft%maxlpawu + 1
  norb_corr = paw_dmft%nspinor * ndim_orb
 
- write(msg,'(a,i4,a,i4,a,i4,a,es14.6)') &
+ ! Count correlated atoms
+ ncorr_atoms = 0
+ do iatom = 1, paw_dmft%natom
+   if (paw_dmft%lpawu(iatom) >= 0) ncorr_atoms = ncorr_atoms + 1
+ end do
+
+ write(msg,'(a,i4,a,i4,a,i4,a,es14.6,a,i4)') &
  ' Response parameters: nboson=', nboson, ' niw_vertex=', niw_vertex, &
- ' norb_corr=', norb_corr, ' beta=', beta
+ ' norb_corr=', norb_corr, ' beta=', beta, ' ncorr_atoms=', ncorr_atoms
  call wrtout(std_out, msg)
 
- ! --- Stage 1: Compute local impurity bubble chi0 ---
- write(msg,'(a)') ' Stage 1: Computing local impurity bubble chi0_imp'
+ ! =====================================================================
+ ! Stage 1: Compute local impurity bubble chi0 for each correlated atom
+ ! =====================================================================
+ write(msg,'(a)') ' Stage 1: Computing local impurity bubble chi0_imp (all correlated atoms)'
  call wrtout(std_out, msg)
 
+ ! Initialize the total (summed over atoms) chi0_imp
  call init_chi_loc(chi0_loc, norb_corr, niw_vertex, nboson)
- call compute_chi0_imp(chi0_loc, green_imp, paw_dmft, norb_corr, niw_vertex, nboson)
 
- ! Write chi0 diagnostics
- call write_chi_loc(chi0_loc, 'DMFT_chi0_imp.dat')
+ do iatom = 1, paw_dmft%natom
+   if (paw_dmft%lpawu(iatom) < 0) cycle
 
- ! --- Stage 1b: Spectral attribution of chi0 (bubble) ---
- if (dtset%dmft_resp_spinflip == 1 .and. paw_dmft%nspinor == 2) then
-   write(msg,'(a)') ' Stage 1b: Spectral attribution of impurity bubble chi0'
+   write(msg,'(a,i4,a,i2)') &
+   '   Computing chi0_imp for atom ', iatom, ' lpawu=', paw_dmft%lpawu(iatom)
    call wrtout(std_out, msg)
 
-   call init_spectral_attribution(attrib_chi0, nboson, ndim_orb, paw_dmft%nspinor)
-   call compute_spectral_attribution(attrib_chi0, chi0_loc, paw_dmft%nspinor)
-   call write_spectral_attribution(attrib_chi0, 'DMFT_attrib_chi0_imp.dat', beta)
-   call destroy_spectral_attribution(attrib_chi0)
+   ! Compute atom-resolved chi0
+   call init_chi_loc(chi0_atom, norb_corr, niw_vertex, nboson)
+   call compute_chi0_imp(chi0_atom, green_imp, paw_dmft, norb_corr, niw_vertex, nboson, &
+     & iatom_index=iatom)
+
+   ! Write atom-resolved chi0 diagnostics
+   write(fname,'(a,i3.3,a)') 'DMFT_chi0_imp_atom', iatom, '.dat'
+   call write_chi_loc(chi0_atom, trim(fname))
+
+   ! Stage 1b: Atom-resolved spectral attribution
+   if (dtset%dmft_resp_spinflip == 1 .and. paw_dmft%nspinor == 2) then
+     write(msg,'(a,i4)') '   Stage 1b: Spectral attribution for atom ', iatom
+     call wrtout(std_out, msg)
+
+     call init_spectral_attribution(attrib_tmp, nboson, ndim_orb, paw_dmft%nspinor)
+     call compute_spectral_attribution(attrib_tmp, chi0_atom, paw_dmft%nspinor)
+     write(fname,'(a,i3.3,a)') 'DMFT_attrib_chi0_imp_atom', iatom, '.dat'
+     call write_spectral_attribution(attrib_tmp, trim(fname), beta)
+     call destroy_spectral_attribution(attrib_tmp)
+   end if
+
+   ! Accumulate into total chi0
+   chi0_loc%chi_mat(:,:,:) = chi0_loc%chi_mat(:,:,:) + chi0_atom%chi_mat(:,:,:)
+
+   call destroy_chi_loc(chi0_atom)
+ end do
+
+ ! Write total chi0 diagnostics
+ call write_chi_loc(chi0_loc, 'DMFT_chi0_imp_total.dat')
+
+ ! Total spectral attribution (sum over atoms)
+ if (dtset%dmft_resp_spinflip == 1 .and. paw_dmft%nspinor == 2) then
+   write(msg,'(a)') '   Stage 1b: Spectral attribution of total chi0_imp'
+   call wrtout(std_out, msg)
+
+   call init_spectral_attribution(attrib_tmp, nboson, ndim_orb, paw_dmft%nspinor)
+   call compute_spectral_attribution(attrib_tmp, chi0_loc, paw_dmft%nspinor)
+   call write_spectral_attribution(attrib_tmp, 'DMFT_attrib_chi0_imp_total.dat', beta)
+   call destroy_spectral_attribution(attrib_tmp)
  end if
 
- ! --- Stage 2: Two-particle measurement from impurity solver ---
+ ! =====================================================================
+ ! Stage 2: Two-particle measurement from impurity solver
+ ! =====================================================================
  write(msg,'(3a)') &
  ' Stage 2: Local two-particle correlation function measurement.',ch10,&
  ' WARNING: TRIQS two-particle measurement interface not yet connected.'
@@ -182,22 +231,83 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc, green_imp)
  ' Vertex extraction and BSE results will be trivial until this is implemented.'
  call wrtout(std_out, msg)
 
- ! --- Stage 3: Extract irreducible vertex ---
+ ! =====================================================================
+ ! Stage 3: Extract irreducible vertex
+ ! =====================================================================
  write(msg,'(a)') ' Stage 3: Extracting local irreducible vertex Gamma_imp'
  call wrtout(std_out, msg)
 
  call init_vertex_irr(vertex_irr, norb_corr, niw_vertex, nboson)
  call extract_vertex_irr(vertex_irr, chi_loc, chi0_loc, norb_corr, niw_vertex, nboson)
 
- ! --- Stage 4: Lattice BSE ---
+ ! =====================================================================
+ ! Stage 4: Lattice BSE
+ ! =====================================================================
  write(msg,'(a)') ' Stage 4: Solving lattice Bethe-Salpeter equation'
  call wrtout(std_out, msg)
 
  call init_lattice_bse(latt_bse, norb_corr, niw_vertex, nboson, paw_dmft%nkpt)
- call compute_chi0_lattice(latt_bse, paw_dmft, norb_corr, niw_vertex, nboson)
+
+ ! --- Populate spinor projectors from chipsi ---
+ ! Use the first correlated atom for projection. For multi-atom systems,
+ ! the lattice bubble includes contributions from all atoms through the
+ ! self-energy embedded in G^KS(k,iw).
+ call init_spinor_proj(sproj, paw_dmft)
+
+ ! Find first correlated atom for populating projectors
+ do iatom = 1, paw_dmft%natom
+   if (paw_dmft%lpawu(iatom) >= 0) then
+     call populate_from_chipsi(sproj, paw_dmft, iatom)
+     call check_spinor_completeness(sproj, tol4)
+     exit
+   end if
+ end do
+
+ ! --- Compute lattice bubble using G(k,iw) from green_imp ---
+ call compute_chi0_lattice(lbse=latt_bse, green_imp=green_imp, paw_dmft=paw_dmft, &
+   & sproj=sproj, norb_corr=norb_corr, niw_vertex=niw_vertex, nboson=nboson)
+
+ ! Write lattice bubble diagnostics (reuse chi_loc write format)
+ call init_chi_loc(chi0_atom, norb_corr, niw_vertex, nboson)
+ chi0_atom%chi_mat(:,:,:) = latt_bse%chi0_latt(:,:,:)
+ call write_chi_loc(chi0_atom, 'DMFT_chi0_lattice.dat')
+ call destroy_chi_loc(chi0_atom)
+
+ ! Stage 4b: Spectral attribution of lattice bubble
+ if (dtset%dmft_resp_spinflip == 1 .and. paw_dmft%nspinor == 2) then
+   write(msg,'(a)') '   Stage 4b: Spectral attribution of lattice bubble chi0_latt'
+   call wrtout(std_out, msg)
+
+   call init_spectral_attribution(attrib_tmp, nboson, ndim_orb, paw_dmft%nspinor)
+   ! Create temporary chi_loc_type view of chi0_latt for attribution
+   call init_chi_loc(chi0_atom, norb_corr, niw_vertex, nboson)
+   chi0_atom%chi_mat(:,:,:) = latt_bse%chi0_latt(:,:,:)
+   call compute_spectral_attribution(attrib_tmp, chi0_atom, paw_dmft%nspinor)
+   call write_spectral_attribution(attrib_tmp, 'DMFT_attrib_chi0_lattice.dat', beta)
+   call destroy_spectral_attribution(attrib_tmp)
+   call destroy_chi_loc(chi0_atom)
+ end if
+
+ ! --- Solve BSE ---
  call solve_lattice_bse(latt_bse, vertex_irr, norb_corr, niw_vertex, nboson)
 
- ! --- Stage 5: Optical kernel (bubble conductivity on Matsubara axis) ---
+ ! Stage 4c: Spectral attribution of BSE-corrected chi
+ if (dtset%dmft_resp_spinflip == 1 .and. paw_dmft%nspinor == 2) then
+   write(msg,'(a)') '   Stage 4c: Spectral attribution of BSE chi_full'
+   call wrtout(std_out, msg)
+
+   call init_spectral_attribution(attrib_tmp, nboson, ndim_orb, paw_dmft%nspinor)
+   call init_chi_loc(chi0_atom, norb_corr, niw_vertex, nboson)
+   chi0_atom%chi_mat(:,:,:) = latt_bse%chi_full(:,:,:)
+   call compute_spectral_attribution(attrib_tmp, chi0_atom, paw_dmft%nspinor)
+   call write_spectral_attribution(attrib_tmp, 'DMFT_attrib_chi_full.dat', beta)
+   call destroy_spectral_attribution(attrib_tmp)
+   call destroy_chi_loc(chi0_atom)
+ end if
+
+ ! =====================================================================
+ ! Stage 5: Optical kernel (bubble conductivity on Matsubara axis)
+ ! =====================================================================
  if (resp_mode >= 1) then
    write(msg,'(a)') ' Stage 5: Computing Matsubara optical conductivity'
    call wrtout(std_out, msg)
@@ -214,7 +324,10 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc, green_imp)
    call destroy_optic_kernel(optic_kern)
  end if
 
- ! --- Cleanup ---
+ ! =====================================================================
+ ! Cleanup
+ ! =====================================================================
+ call destroy_spinor_proj(sproj)
  call destroy_lattice_bse(latt_bse)
  call destroy_vertex_irr(vertex_irr)
  call destroy_chi_loc(chi_loc)

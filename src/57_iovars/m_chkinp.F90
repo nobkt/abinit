@@ -747,6 +747,51 @@ subroutine chkinp(dtsets, iout, mpi_enregs, ndtset, ndtset_alloc, npsp, pspheads
        call chkint_eq(0,1,cond_string,cond_values,ierr,'dmft_t2g',dt%dmft_t2g,2,(/0,1/),iout)
        cond_string(1)='usedmft' ; cond_values(1)=dt%usedmft
        call chkint_eq(0,1,cond_string,cond_values,ierr,'dmft_x2my2d',dt%dmft_x2my2d,2,(/0,1/),iout)
+       cond_string(1)='usedmft' ; cond_values(1)=dt%usedmft
+       call chkint_eq(0,1,cond_string,cond_values,ierr,'dmft_resp_mode',dt%dmft_resp_mode,3,(/0,1,2/),iout)
+       cond_string(1)='usedmft' ; cond_values(1)=dt%usedmft
+       call chkint_eq(0,1,cond_string,cond_values,ierr,'dmft_resp_spinflip',dt%dmft_resp_spinflip,2,(/0,1/),iout)
+       cond_string(1)='usedmft' ; cond_values(1)=dt%usedmft
+       call chkint_eq(0,1,cond_string,cond_values,ierr,'dmft_resp_current_vertex',dt%dmft_resp_current_vertex,2,(/0,1/),iout)
+       cond_string(1)='usedmft' ; cond_values(1)=dt%usedmft
+       call chkint_eq(0,1,cond_string,cond_values,ierr,'dmft_resp_realaxis_backend',dt%dmft_resp_realaxis_backend,2,(/0,1/),iout)
+       cond_string(1)='usedmft' ; cond_values(1)=dt%usedmft
+       call chkint_eq(0,1,cond_string,cond_values,ierr,'dmft_resp_soc_required',dt%dmft_resp_soc_required,2,(/0,1/),iout)
+       if (dt%dmft_resp_mode>0) then
+         cond_string(1)='dmft_resp_mode' ; cond_values(1)=dt%dmft_resp_mode
+         call chkint_ge(0,1,cond_string,cond_values,ierr,'dmft_resp_nboson',dt%dmft_resp_nboson,1,iout)
+         call chkint_ge(0,1,cond_string,cond_values,ierr,'dmft_resp_niw_vertex',dt%dmft_resp_niw_vertex,1,iout)
+       end if
+       if (dt%dmft_resp_spinflip==1) then
+         if (dt%dmft_solv/=7) then
+           write(msg,'(3a)')&
+           'dmft_resp_spinflip=1 requires dmft_solv=7 (rotationally invariant TRIQS/CT-HYB).',ch10,&
+           'Action: set dmft_solv=7 or disable dmft_resp_spinflip.'
+           ABI_ERROR(msg)
+         end if
+         if (dt%nspinor/=2.and.dt%dmft_resp_soc_required==1) then
+           write(msg,'(5a)')&
+           'dmft_resp_spinflip=1 with dmft_resp_soc_required=1 requires nspinor=2',ch10,&
+           '(noncollinear magnetism or spin-orbit coupling).',ch10,&
+           'Action: enable SOC or noncollinear magnetism, or set dmft_resp_soc_required=0.'
+           ABI_ERROR(msg)
+         end if
+       end if
+       if (dt%dmft_resp_mode==2) then
+         if (dt%dmft_resp_realaxis_backend/=1) then
+           write(msg,'(5a)')&
+           'dmft_resp_mode=2 (real-frequency absorption) requires dmft_resp_realaxis_backend=1.',ch10,&
+           'Real-axis backend is not yet implemented. Use dmft_resp_mode=1 for Matsubara response.',ch10,&
+           'Action: set dmft_resp_mode=1 or wait for real-axis backend implementation.'
+           ABI_ERROR(msg)
+         end if
+       end if
+       if (dt%dmft_resp_current_vertex==1.and.dt%dmft_resp_mode==0) then
+         write(msg,'(3a)')&
+         'dmft_resp_current_vertex=1 requires dmft_resp_mode>0.',ch10,&
+         'Action: set dmft_resp_mode=1 or 2.'
+         ABI_ERROR(msg)
+       end if
        if (dt%dmft_solv>=5.and.dt%ucrpa==0.and.dt%dmft_solv/=9.and.dt%dmft_solv/=6.and.dt%dmft_solv/=7) then
          cond_string(1)='usedmft' ; cond_values(1)=dt%usedmft
          call chkint_ge(0,1,cond_string,cond_values,ierr,'dmftqmc_l',dt%dmftqmc_l,1,iout)

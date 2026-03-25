@@ -2339,6 +2339,13 @@ subroutine indefo(dtsets, ndtset_alloc, nprocs)
    dtsets(idtset)%dmft_prtself=0
    dtsets(idtset)%dmft_prtwan=0
    dtsets(idtset)%dmft_read_occnd=0
+   dtsets(idtset)%dmft_resp_current_vertex=0
+   dtsets(idtset)%dmft_resp_mode=0
+   dtsets(idtset)%dmft_resp_nboson=0
+   dtsets(idtset)%dmft_resp_niw_vertex=0
+   dtsets(idtset)%dmft_resp_realaxis_backend=0
+   dtsets(idtset)%dmft_resp_soc_required=0
+   dtsets(idtset)%dmft_resp_spinflip=0
    dtsets(idtset)%dmft_rslf=1
    dtsets(idtset)%dmft_shiftself(:)=0.0_dp
    dtsets(idtset)%dmft_solv=5

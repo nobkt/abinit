@@ -144,6 +144,13 @@ type, public :: dataset_type
  integer :: dmft_prtself
  integer :: dmft_prtwan
  integer :: dmft_read_occnd
+ integer :: dmft_resp_current_vertex
+ integer :: dmft_resp_mode
+ integer :: dmft_resp_nboson
+ integer :: dmft_resp_niw_vertex
+ integer :: dmft_resp_realaxis_backend
+ integer :: dmft_resp_soc_required
+ integer :: dmft_resp_spinflip
  integer :: dmft_rslf
  integer :: dmft_solv
  integer :: dmft_t2g

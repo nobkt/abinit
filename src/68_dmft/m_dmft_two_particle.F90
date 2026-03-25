@@ -228,7 +228,7 @@ subroutine compute_chi0_imp(chi0, green_imp, paw_dmft, norb_corr, niw_vertex, nb
  end do
 
  if (iatom_corr == 0) then
-   ABI_ERROR('compute_chi0_imp: no correlated atom found (all lpawu < 0)')
+   ABI_ERROR('compute_chi0_imp: no correlated atom found (no atoms with lpawu >= 0)')
  end if
 
  write(msg,'(a,i4,a,i2)') &

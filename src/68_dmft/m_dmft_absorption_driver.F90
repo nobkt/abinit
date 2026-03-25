@@ -138,8 +138,8 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc, green_imp)
  beta = one / paw_dmft%temp
 
  ! --- Determine correlated orbital count ---
- norb_corr = paw_dmft%nspinor * (2 * paw_dmft%maxlpawu + 1)
  ndim_orb = 2 * paw_dmft%maxlpawu + 1
+ norb_corr = paw_dmft%nspinor * ndim_orb
 
  write(msg,'(a,i4,a,i4,a,i4,a,es14.6)') &
  ' Response parameters: nboson=', nboson, ' niw_vertex=', niw_vertex, &

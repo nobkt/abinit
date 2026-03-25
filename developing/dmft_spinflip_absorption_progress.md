@@ -648,10 +648,12 @@ MnF₂ の反強磁性体において、スピン反転感受率が特定の k �
     - 支配的軌道ペア vs 周波数（各周波数で最大の |χ^{+-}_{mm'}| を持つ (m, m') ペア）
     - 周波数安定性診断（支配チャネルが全周波数で一貫するかの判定）
 
+13. **光学伝導度スピンチャネル帰属（実装済み）**: バブル光学伝導度 Π_μν^bubble をスピン保存 / S⁺S⁻ / S⁻S⁺ の3チャネルに分解。KS バンド基底での電流行列要素 j_μ^{ab}(k) と格子 Green 関数 G^{ab}(k,iω) の4重積 Σ_{abcd} j_μ^{ab} G^{bc} j_ν^{cd} G^{da} の外殻添字 (a,d) のスピン帰属に基づく厳密な分類。出力ファイル `DMFT_optic_kernel.dat`。
+
 ### 今後実装すべき帰属機能
 
 11. ~~**k 点分解**: 逆格子空間での寄与の分布を出力する~~ → **Phase 17 で実装済み**
-12. **光学応答の帰属**: 光学伝導度 Π_μν を軌道対ごとに分解し、各吸収ピークの軌道起源を同定する（電流行列要素実装後）
+12. ~~**光学応答の帰属**: 光学伝導度 Π_μν を軌道対ごとに分解し、各吸収ピークの軌道起源を同定する（電流行列要素実装後）~~ → **Phase 20-21 で光学伝導度のスピンチャネル帰属を実装済み。軌道ペア分解は次ステップ。**
 13. **原子間交差項の帰属**: 異なる原子間の交差寄与を格子バブルレベルで分解する（lpawu が異なる原子を含む系向け）
 14. ~~**k 点分解の軌道分解**: 各 k 点における軌道ペア分解 S⁺S⁻ 感受率を出力する（Phase 17 の拡張）~~ → **Phase 18 で実装済み**
 15. ~~**周波数依存帰属プロファイル**: 各ボソン周波数での支配チャネル/軌道ペアの同定~~ → **Phase 19 で実装済み**
@@ -672,6 +674,7 @@ MnF₂ の反強磁性体において、スピン反転感受率が特定の k �
 | `DMFT_attrib_summary_bse.dat` | BSE サマリー | BSE レベルの静的感受率・軌道ランキング |
 | `DMFT_attrib_freqprofile_bse.dat` | BSE プロファイル | 周波数依存帰属プロファイル（支配チャネル/軌道） |
 | `DMFT_attrib_comparison.dat` | レベル間比較 | 不純物/格子/BSE の3段階比較（差分付き） |
+| `DMFT_optic_kernel.dat` | バブル光学伝導度 | Π_μν テンソルのスピンチャネル分解（SC/S⁺S⁻/S⁻S⁺） |
 
 ---
 
@@ -692,3 +695,208 @@ MnF₂ の反強磁性体において、スピン反転感受率が特定の k �
 7. **has_operks の可用性**: `compute_chi0_lattice` は `green_imp%oper(iw)%has_operks == 1` を前提とする。KS 基底データがないケース（例: 特定の DMFT ソルバーでの省メモリモード）では格子バブルがゼロになる。`ladd=.true.`（累積モード）の場合は既存の値を保持し、他の原子の寄与を壊さない設計とした。
 
 8. **lpawu 不整合原子の除外**: 格子バブル計算では `lpawu /= maxlpawu` の原子を除外する。これは複合添字空間の次元が `maxlpawu` で定義されているためであり、異なる `lpawu` の原子の投影子を同じ空間で累積できないことに起因する。MnF₂（全 Mn 原子が lpawu=2）では問題にならないが、異種原子系（例: d + f 混合系）では一部の原子の寄与が失われる。この制約の解消には複合添字空間の拡張が必要。
+
+---
+
+## Phase 20-22: 電流頂点と光学バブル伝導度の帰属分解
+
+### 19. 電流頂点モジュール（Phase 20: 完了）
+
+**目的:** 光学伝導度バブル Π_μν^bubble の計算に必要な運動量行列要素 <ψ_a(k)|−i∇_μ|ψ_b(k)> を DMFT フレームワーク内で計算する
+
+**背景:**
+
+光学吸収スペクトルの帰属を行うには、感受率 χ のレベルだけでなく、光学伝導度 Π_μν のレベルでスピンチャネルと軌道ペアの分解が必要である。Π_μν の計算には電流（速度）行列要素 j_μ(k) が不可欠であり、これまでの実装ではこの部分がスケルトンのままであった。
+
+設計書 Section 5.13-5.14 に基づき、電流演算子は
+```
+j_μ = −e ∂H/∂k_μ
+```
+であり、KS 固有状態基底では
+```
+<ψ_a(k)|j_μ|ψ_b(k)> = −e × <ψ_a(k)|−i∇_μ|ψ_b(k)>
+```
+で与えられる。PAW 形式では運動量行列要素は2つの寄与からなる：
+1. **運動学的部分**: Σ_G (k+G)_μ × c*_a(G) × c_b(G) — 平面波部分
+2. **PAW 増強部分**: −i × Σ_{ij,atom} cprj*_{a,i} × ∇_ij × cprj_{b,j} — PAW 球内補正
+
+ここで ∇_ij = <φ_i|∇|φ_j> − <t̃φ_i|∇|t̃φ_j> は全電子と擬部分波の差分の行列要素であり、pawtab%nabla_ij に格納される。
+
+**実装した内容:**
+
+1. **`paw_dmft_type` への速度行列格納フィールドの追加**: `m_paw_dmft.F90` に以下を追加：
+   - `psinablapsi_dmft(2, 3, mbandc, mbandc, nkpt, nsppol)` — 運動量行列要素の格納配列
+   - `has_psinablapsi_dmft` — 計算状態フラグ（0: 未計算、1: 計算済み）
+   - `destroy_dmft` に ABI_SFREE 追加
+
+2. **`m_dmft_current_vertex.F90` モジュールの新規作成**: 以下の公開サブルーチンを実装：
+   - `compute_psinablapsi_dmft`: cg（平面波係数）、cprj（PAW 投影子係数）、kg（G ベクトル指標）を用いて、相関バンド窓 [dmftbandi, dmftbandf] 内の全バンドペア (a,b) について運動量行列要素を計算
+
+3. **運動学的部分の計算**: 各 k 点で (k+G)_μ ベクトルを構築し、平面波係数の共役積との内積を計算：
+   ```
+   <ψ_a|−i∇_μ|ψ_b> ← Σ_G (k+G)_μ × c*_a(G) × c_b(G)
+   ```
+   nspinor=2 の場合、同一 G ベクトルがスピン成分間で共有されるため、kpg_k 配列を 2*npw_k サイズで確保し、第2スピノル成分にも同じ G ベクトルをコピーする。
+
+4. **PAW 増強部分の計算**: pawtab%nabla_ij が利用可能な場合（has_nabla フラグで判定）、`pawcprj_get` を用いて各 k 点の cprj データを抽出し、PAW 球内補正を追加：
+   ```
+   <ψ_a|−i∇_μ|ψ_b> += −i × Σ_{ij,atom} cprj*_{a,i} × nabla_ij(μ) × cprj_{b,j}
+   ```
+   nabla_ij が未計算の場合は運動学的部分のみを計算し、WARNING を出力する。これはヒューリスティックな省略ではなく、nabla_ij が `pawnabla_init` の呼び出しに依存するという技術的制約の反映である。
+
+5. **`vtorho` からの呼び出し接続**: `m_vtorho.F90` に以下を追加：
+   - `use m_dmft_current_vertex` の追加
+   - `datafordmft` の呼び出し直後（cg, cprj, kg がメモリ上にある時点）で `compute_psinablapsi_dmft` を呼び出し
+   - `dtset%dmft_resp_mode > 0` の条件で制御
+   - `cryst_struc`（atindx1 用）、`mpi_enreg%comm_kpt`（MPI 通信用）、`mpi_enreg%proc_distrb`（プロセス分散用）を引数として渡す
+
+**データフローの変更:**
+
+```
+vtorho
+  ├── datafordmft → chipsi, eigen_dft を paw_dmft に格納
+  ├── compute_psinablapsi_dmft → psinablapsi_dmft を paw_dmft に格納 [NEW]
+  └── dmft_solve
+        └── dmft_absorption_run → psinablapsi_dmft を利用して bubble conductivity を計算
+```
+
+**変更ファイル:**
+- `src/65_paw/m_paw_dmft.F90` — psinablapsi_dmft フィールド追加、destroy 更新
+- `src/68_dmft/m_dmft_current_vertex.F90` — 新規モジュール
+- `src/79_seqpar_mpi/m_vtorho.F90` — use 文追加、compute_psinablapsi_dmft 呼び出し追加
+
+### 20. バブル光学伝導度の実装（Phase 21: 完了）
+
+**目的:** スケルトンだった `compute_bubble_conductivity` を完全実装し、スピンチャネル帰属分解を追加する
+
+**実装した内容:**
+
+1. **`optic_kernel_type` のスピンチャネル分解拡張**: 既存の `pi_bubble`, `pi_vertex`, `pi_total` に加え、以下を追加：
+   - `pi_bubble_sc(nboson, ndir, ndir)` — スピン保存成分
+   - `pi_bubble_pm(nboson, ndir, ndir)` — S⁺S⁻ スピン反転成分
+   - `pi_bubble_mp(nboson, ndir, ndir)` — S⁻S⁺ スピン反転成分
+
+2. **`compute_bubble_conductivity` の完全実装**: バブル光学伝導度を厳密に計算：
+   ```
+   Π_μν^bubble(iΩ_m) = −(1/βN_k) Σ_{k,n} Σ_{a,b,c,d} j_μ^{ab}(k) G^{bc}(k,iω_n) j_ν^{cd}(k) G^{da}(k,iω_n+iΩ_m)
+   ```
+   ここで：
+   - j_μ^{ab}(k) は `paw_dmft%psinablapsi_dmft` から構築
+   - G^{ab}(k,iω) は `green_imp%oper(iw)%ks(a,b,ikpt,isppol)` からアクセス
+   - `has_psinablapsi_dmft /= 1` の場合はゼロを返し、WARNING を出力
+
+3. **スピンチャネル分解の実装**: nspinor=2 の場合、4重ループの外殻添字 (a,d) のスピン帰属に基づいて各寄与をスピンチャネルに分類：
+   - **スピン保存** (sc): a と d が同じスピンブロック（a ≤ N/2 かつ d ≤ N/2、または a > N/2 かつ d > N/2）
+   - **S⁺S⁻** (pm): a がスピンアップブロック（a ≤ N/2）、d がスピンダウンブロック（d > N/2）
+   - **S⁻S⁺** (mp): a がスピンダウン、d がスピンアップ
+
+   この分類は `classify_spin_pair` 純粋関数で実装。
+
+4. **`write_optic_kernel` の拡張**: 出力を3セクションに拡張：
+   - **Section 1**: 全光学カーネル Π_μν（バブル + 全体）
+   - **Section 2**: スピンチャネル分解（各ボソン周波数でのSC/PM/MP成分）
+   - **Section 3**: iΩ=0 での対角成分のスピンチャネル分率
+
+5. **ドライバの更新**: `dmft_absorption_run` の Stage 5 で `compute_bubble_conductivity` に `green_imp`, `niw_vertex`, `nspinor` を追加で渡す。
+
+**物理的意味:**
+
+バブル光学伝導度のスピンチャネル分解により、光学吸収スペクトルのどの部分がスピン反転遷移に起因するかを直接同定できる。具体的には：
+- Π_μν^{S+S-} が大きい偏光方向では、その方向の光がスピン反転励起を効率的に誘起する
+- スピン保存成分 Π_μν^{sc} と S⁺S⁻ 成分 Π_μν^{pm} の比率から、スピン反転遷移の相対的重要性を定量化できる
+- テンソル成分（μ,ν）ごとの分解により、偏光方向に依存したスピン反転吸収の異方性を検出できる（MnF₂ の正方晶系で重要）
+
+**出力ファイル:**
+
+| ファイル名 | 内容 |
+| --- | --- |
+| `DMFT_optic_kernel.dat` | Matsubara 軸上の光学伝導度テンソル（スピンチャネル分解付き） |
+
+**帰属の新機能:**
+
+光学伝導度レベルの帰属により、感受率 χ のレベルの帰属（Phase 8-19 で実装済み）に加えて、光学吸収に直接対応する物理量でのスピン/軌道帰属が可能になった：
+
+| 帰属レベル | 物理量 | 出力 |
+| --- | --- | --- |
+| 不純物バブル χ₀^imp | 局所感受率 | DMFT_attrib_chi0_imp_*.dat |
+| 格子バブル χ₀^latt | 格子感受率 | DMFT_attrib_chi0_lattice.dat |
+| BSE 全感受率 χ_full | 頂点補正込み感受率 | DMFT_attrib_chi_full.dat |
+| **バブル光学伝導度 Π^bubble** | **電流−電流相関関数** | **DMFT_optic_kernel.dat** |
+
+**変更ファイル:**
+- `src/68_dmft/m_dmft_optic_kernel.F90` — compute_bubble_conductivity 完全実装、スピン分解追加
+- `src/68_dmft/m_dmft_absorption_driver.F90` — Stage 5 の引数更新
+- `src/68_dmft/CMakeLists.txt` — m_dmft_current_vertex.F90 追加
+- `src/68_dmft/abinit.src` — m_dmft_current_vertex.F90 追加
+
+### 正直な到達点の評価（Phase 22 時点）
+
+**現時点で完成しているもの:**
+- 入力変数体系と整合性検査
+- 全モジュールのデータ構造定義
+- **不純物バブル χ₀^imp の完全な計算**
+- **多原子サポート**
+- **スピンチャネル帰属分解**（3チャネルへの厳密分解）
+- **軌道分解帰属**
+- **スピノル投影子の chipsi 接続**
+- **格子バブル χ₀^latt の完全な計算**
+- **多原子格子バブル**
+- **格子レベル帰属分解**
+- **レベル間帰属比較**
+- **帰属サマリーの物理量抽出**
+- **k 点分解格子バブル帰属**
+- **k 点分解軌道ペア帰属**
+- **周波数依存帰属プロファイル**
+- 既約頂点抽出の行列演算
+- 格子 BSE 解法の行列演算
+- Matsubara 軸での出力フォーマット
+- 高水準ドライバによる全ステージのオーケストレーション
+- DMFT ループから吸収計算ドライバへの呼び出し接続
+- **運動量行列要素 <ψ_a|−i∇|ψ_b> の計算**（運動学的部分 + PAW 増強部分）[NEW]
+- **バブル光学伝導度 Π_μν^bubble の完全な計算**[NEW]
+- **光学伝導度のスピンチャネル帰属分解**（SC/S⁺S⁻/S⁻S⁺）[NEW]
+
+**現時点で完成していないもの:**
+1. **局所二粒子相関関数 χ^imp の測定**: TRIQS/CT-HYB インターフェースへの連携口。**これが最大のボトルネック**。
+2. **光学伝導度の軌道ペア分解**: Π_μν を個々の軌道遷移 (m,m') に分解する帰属（電流行列要素の投影が必要）
+3. **PAW nabla_ij の自動初期化**: 現在は pawnabla_init が optics 後処理でのみ呼ばれるため、DMFT 応答計算時に nabla_ij が利用可能かはユーザーの設定に依存する。将来的には dmft_resp_mode > 0 の場合に自動的に pawnabla_init を呼ぶようにすべき。
+4. **k 点並列化**: compute_bubble_conductivity と compute_psinablapsi_dmft のMPI並列化
+5. **実周波数応答バックエンド**: dmft_resp_mode=2 の実装
+
+### 次ステップ
+
+#### 次ステップ 0: PAW nabla_ij の自動初期化
+
+**目的:** dmft_resp_mode > 0 の場合に PAW 増強部分を自動的に有効化する
+
+**実装計画:**
+- `vtorho` または `datafordmft` で `dmft_resp_mode > 0` かつ `pawtab%has_nabla < 2` の場合に `pawnabla_init` を呼び出す
+- `pawnabla_init` は `pawrad` を必要とするため、`vtorho` の引数リストから取得する（既に利用可能）
+
+#### 次ステップ 1: 光学伝導度の軌道ペア分解
+
+**目的:** Π_μν を軌道遷移 (m,m') ごとに分解し、吸収ピークの軌道起源を同定する
+
+**実装計画:**
+- chipsi 投影子を用いて、速度行列要素 j_μ^{ab}(k) を相関軌道空間に投影
+- Π_μν^{mm'} = sum_{k,n} j_μ^{αβ}(k) G G j_ν を軌道 (m,m') ごとに分解
+- `DMFT_attrib_optic_orbital.dat` として出力
+
+#### 次ステップ 2: TRIQS 二粒子インターフェース
+
+**目的:** TRIQS/CT-HYB の `measure_G2_iw_ph` から χ^imp を取得する
+
+**実装計画:**
+- `triqs_cthyb_qmc.cpp` に二粒子 Green 関数測定パラメータを追加
+- 測定結果を ABINIT のデータ構造に変換するブリッジを実装
+- これが完成しない限り、Γ はゼロのままで BSE 結果はバブル近似と等価
+
+#### 次ステップ 3: 実周波数応答バックエンド
+
+**目的:** dmft_resp_mode=2 の実装（最難関）
+
+**候補手法:**
+- 数値的解析接続は設計書で禁止されている
+- 許されるのは:
+  - (A) 実周波数の不純物応答を直接計算する補助ソルバー
+  - (B) Lehmann 表示を明示的に用いる定式化

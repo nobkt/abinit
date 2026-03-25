@@ -58,6 +58,7 @@ MODULE m_dmft_spectral_attribution
  public :: write_spectral_attribution
  public :: write_attribution_comparison
  public :: write_attribution_summary
+ public :: write_frequency_profile
 
 !!***
 
@@ -841,6 +842,233 @@ subroutine write_attribution_summary(attrib, fname, beta)
  call wrtout(std_out, msg)
 
 end subroutine write_attribution_summary
+
+!!***
+
+!!****f* m_dmft_spectral_attribution/write_frequency_profile
+!! NAME
+!!  write_frequency_profile
+!!
+!! FUNCTION
+!!  Write a frequency-by-frequency attribution profile identifying
+!!  the dominant spin channel and orbital pair at each bosonic frequency.
+!!
+!!  For each bosonic Matsubara frequency iOm_m, this output shows:
+!!  - Which spin channel (conserving, S+S-, S-S+) carries the largest weight
+!!  - Which orbital pair (m, m') has the largest S+S- and S-S+ magnitude
+!!  - The ratio of spin-flip to total susceptibility as function of frequency
+!!
+!!  This enables identifying energy-scale-dependent attribution:
+!!  e.g., whether spin-flip processes dominate at low vs high frequencies,
+!!  indicating different excitation energy scales.
+!!
+!! INPUTS
+!!  attrib = spectral attribution data (must be computed beforehand)
+!!  fname = output file name
+!!  beta = inverse temperature
+!!
+!! NOTES
+!!  No heuristic processing. All quantities are computed from the
+!!  Matsubara-axis data without analytic continuation.
+!!
+!! SOURCE
+
+subroutine write_frequency_profile(attrib, fname, beta)
+
+ type(spectral_attribution_type), intent(in) :: attrib
+ character(len=*), intent(in) :: fname
+ real(dp), intent(in) :: beta
+
+!Local variables
+ integer :: unt, ios, iom, im, imp, ndim_orb, nboson
+ integer :: max_pm_m, max_pm_mp, max_mp_m, max_mp_mp
+ real(dp) :: omega_boson, abs_total, abs_sc, abs_pm, abs_mp
+ real(dp) :: frac_sc, frac_pm, frac_mp
+ real(dp) :: max_pm_val, max_mp_val, cur_val
+ character(len=20) :: dominant_channel
+ character(len=500) :: msg
+
+! *********************************************************************
+
+ nboson = attrib%nboson
+ ndim_orb = attrib%ndim_orb
+
+ open(newunit=unt, file=fname, form='formatted', action='write', iostat=ios)
+ if (ios /= 0) then
+   write(msg,'(3a)') 'Cannot open file: ', trim(fname), ' for writing.'
+   ABI_ERROR(msg)
+ end if
+
+ write(unt,'(a)') '# DFT+DMFT Frequency-Dependent Attribution Profile'
+ write(unt,'(a)') '# For each bosonic frequency, identifies the dominant spin channel'
+ write(unt,'(a)') '# and orbital pair contributing to the susceptibility.'
+ write(unt,'(a)') '# No analytic continuation or heuristic processing applied.'
+ write(unt,'(a,es14.6)') '# beta = ', beta
+ write(unt,'(a,i6)') '# nboson = ', nboson
+ write(unt,'(a,i4)') '# ndim_orb = ', ndim_orb
+ write(unt,'(a)')
+
+ ! --- Section 1: Channel fractions vs frequency ---
+ write(unt,'(a)') '# ================================================================='
+ write(unt,'(a)') '# Section 1: Channel fractions vs bosonic frequency'
+ write(unt,'(a)') '# ================================================================='
+ write(unt,'(a)') '# Shows how the relative weight of each spin channel changes with'
+ write(unt,'(a)') '# bosonic frequency. A frequency-dependent fraction indicates that'
+ write(unt,'(a)') '# different excitation energy scales are governed by different channels.'
+ write(unt,'(a)') '#'
+ write(unt,'(a)') '# iOm  Omega_boson  |total|  |sc|  |pm|  |mp|  ' // &
+   'frac_sc  frac_pm  frac_mp  dominant_channel'
+
+ do iom = 1, nboson
+   omega_boson = two_pi * dble(iom - 1) / beta
+
+   abs_total = abs(attrib%chi_total(iom))
+   abs_sc = abs(attrib%chi_spin_conserving(iom))
+   abs_pm = abs(attrib%chi_spin_flip_pm(iom))
+   abs_mp = abs(attrib%chi_spin_flip_mp(iom))
+
+   if (abs_total > tol14) then
+     frac_sc = abs_sc / abs_total
+     frac_pm = abs_pm / abs_total
+     frac_mp = abs_mp / abs_total
+   else
+     frac_sc = zero
+     frac_pm = zero
+     frac_mp = zero
+   end if
+
+   ! Determine dominant channel
+   if (abs_sc >= abs_pm .and. abs_sc >= abs_mp) then
+     dominant_channel = 'spin-conserving'
+   else if (abs_pm >= abs_sc .and. abs_pm >= abs_mp) then
+     dominant_channel = 'S+S-'
+   else
+     dominant_channel = 'S-S+'
+   end if
+
+   write(unt,'(i6,es14.6,4es14.4,3f8.4,2x,a)') &
+     iom, omega_boson, abs_total, abs_sc, abs_pm, abs_mp, &
+     frac_sc, frac_pm, frac_mp, trim(dominant_channel)
+ end do
+
+ write(unt,'(a)')
+
+ ! --- Section 2: Dominant orbital pair at each frequency ---
+ write(unt,'(a)') '# ================================================================='
+ write(unt,'(a)') '# Section 2: Dominant orbital pair at each bosonic frequency'
+ write(unt,'(a)') '# ================================================================='
+ write(unt,'(a)') '# For each frequency, the orbital pair (m, m_prime) with the largest'
+ write(unt,'(a)') '# |chi^{+-}_{mm_prime}| and |chi^{-+}_{mm_prime}| is identified.'
+ write(unt,'(a)') '# This reveals whether the orbital character of spin-flip excitations'
+ write(unt,'(a)') '# changes with excitation energy scale.'
+ write(unt,'(a)') '#'
+ write(unt,'(a)') '# iOm  Omega_boson  pm_m  pm_mp  |chi_pm|  mp_m  mp_mp  |chi_mp|'
+
+ do iom = 1, nboson
+   omega_boson = two_pi * dble(iom - 1) / beta
+
+   ! Find dominant S+S- orbital pair at this frequency
+   max_pm_val = zero
+   max_pm_m = 1
+   max_pm_mp = 1
+   do im = 1, ndim_orb
+     do imp = 1, ndim_orb
+       cur_val = abs(attrib%chi_pm_orbital(iom, im, imp))
+       if (cur_val > max_pm_val) then
+         max_pm_val = cur_val
+         max_pm_m = im
+         max_pm_mp = imp
+       end if
+     end do
+   end do
+
+   ! Find dominant S-S+ orbital pair at this frequency
+   max_mp_val = zero
+   max_mp_m = 1
+   max_mp_mp = 1
+   do im = 1, ndim_orb
+     do imp = 1, ndim_orb
+       cur_val = abs(attrib%chi_mp_orbital(iom, im, imp))
+       if (cur_val > max_mp_val) then
+         max_mp_val = cur_val
+         max_mp_m = im
+         max_mp_mp = imp
+       end if
+     end do
+   end do
+
+   write(unt,'(i6,es14.6,2i4,es16.6,2i4,es16.6)') &
+     iom, omega_boson, &
+     max_pm_m, max_pm_mp, max_pm_val, &
+     max_mp_m, max_mp_mp, max_mp_val
+ end do
+
+ write(unt,'(a)')
+
+ ! --- Section 3: Frequency stability assessment ---
+ write(unt,'(a)') '# ================================================================='
+ write(unt,'(a)') '# Section 3: Frequency stability of dominant channels'
+ write(unt,'(a)') '# ================================================================='
+ write(unt,'(a)') '# Checks whether the dominant channel remains consistent across'
+ write(unt,'(a)') '# all bosonic frequencies. A channel change with frequency indicates'
+ write(unt,'(a)') '# multiple excitation mechanisms at different energy scales.'
+ write(unt,'(a)') '#'
+
+ if (nboson >= 2) then
+   ! Check if dominant channel at iOm=0 is the same at other frequencies
+   abs_sc = abs(attrib%chi_spin_conserving(1))
+   abs_pm = abs(attrib%chi_spin_flip_pm(1))
+   abs_mp = abs(attrib%chi_spin_flip_mp(1))
+
+   if (abs_sc >= abs_pm .and. abs_sc >= abs_mp) then
+     dominant_channel = 'spin-conserving'
+   else if (abs_pm >= abs_sc .and. abs_pm >= abs_mp) then
+     dominant_channel = 'S+S-'
+   else
+     dominant_channel = 'S-S+'
+   end if
+
+   write(unt,'(a,a)') '# Dominant channel at iOm=0: ', trim(dominant_channel)
+
+   ! Count frequency points where dominant channel differs
+   im = 0  ! reuse as counter for channel changes
+   do iom = 2, nboson
+     abs_sc = abs(attrib%chi_spin_conserving(iom))
+     abs_pm = abs(attrib%chi_spin_flip_pm(iom))
+     abs_mp = abs(attrib%chi_spin_flip_mp(iom))
+
+     if (abs_sc >= abs_pm .and. abs_sc >= abs_mp) then
+       msg = 'spin-conserving'
+     else if (abs_pm >= abs_sc .and. abs_pm >= abs_mp) then
+       msg = 'S+S-'
+     else
+       msg = 'S-S+'
+     end if
+
+     if (trim(msg(1:20)) /= trim(dominant_channel)) then
+       im = im + 1
+     end if
+   end do
+
+   if (im == 0) then
+     write(unt,'(a)') '# Dominant channel is CONSISTENT across all bosonic frequencies.'
+     write(unt,'(a)') '# This indicates a single excitation mechanism dominates at all energy scales.'
+   else
+     write(unt,'(a,i4,a,i4,a)') '# Dominant channel CHANGES at ', im, ' of ', nboson - 1, &
+       ' frequency points.'
+     write(unt,'(a)') '# This indicates MULTIPLE excitation mechanisms at different energy scales.'
+     write(unt,'(a)') '# Inspect Section 1 for the frequency-resolved breakdown.'
+   end if
+ else
+   write(unt,'(a)') '# Only 1 bosonic frequency; stability cannot be assessed.'
+ end if
+
+ close(unt)
+
+ write(msg,'(3a)') ' write_frequency_profile: Written to ', trim(fname)
+ call wrtout(std_out, msg)
+
+end subroutine write_frequency_profile
 
 !!***
 

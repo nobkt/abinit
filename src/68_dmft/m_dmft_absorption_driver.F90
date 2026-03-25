@@ -52,7 +52,8 @@ MODULE m_dmft_absorption_driver
  use m_dmft_spectral_attribution, only : spectral_attribution_type, &
    & init_spectral_attribution, destroy_spectral_attribution, &
    & compute_spectral_attribution, write_spectral_attribution, &
-   & write_attribution_comparison, write_attribution_summary
+   & write_attribution_comparison, write_attribution_summary, &
+   & write_frequency_profile
  use m_dmft_spinor_proj, only : spinor_proj_type, init_spinor_proj, destroy_spinor_proj, &
    & populate_from_chipsi, check_spinor_completeness
 
@@ -238,6 +239,7 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc, green_imp)
    call compute_spectral_attribution(attrib_imp, chi0_loc, paw_dmft%nspinor)
    call write_spectral_attribution(attrib_imp, 'DMFT_attrib_chi0_imp_total.dat', beta)
     call write_attribution_summary(attrib_imp, 'DMFT_attrib_summary_imp.dat', beta)
+    call write_frequency_profile(attrib_imp, 'DMFT_attrib_freqprofile_imp.dat', beta)
    ! attrib_imp is kept alive for Stage 6 cross-level comparison
  end if
 
@@ -364,6 +366,7 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc, green_imp)
    call destroy_chi_loc(chi0_atom)
    call write_spectral_attribution(attrib_latt, 'DMFT_attrib_chi0_lattice.dat', beta)
     call write_attribution_summary(attrib_latt, 'DMFT_attrib_summary_latt.dat', beta)
+    call write_frequency_profile(attrib_latt, 'DMFT_attrib_freqprofile_latt.dat', beta)
    ! attrib_latt is kept alive for Stage 6 cross-level comparison
  end if
 
@@ -382,6 +385,7 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc, green_imp)
    call destroy_chi_loc(chi0_atom)
    call write_spectral_attribution(attrib_bse, 'DMFT_attrib_chi_full.dat', beta)
     call write_attribution_summary(attrib_bse, 'DMFT_attrib_summary_bse.dat', beta)
+    call write_frequency_profile(attrib_bse, 'DMFT_attrib_freqprofile_bse.dat', beta)
    ! attrib_bse is kept alive for Stage 6 cross-level comparison
  end if
 

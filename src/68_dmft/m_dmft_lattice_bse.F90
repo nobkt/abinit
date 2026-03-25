@@ -120,6 +120,16 @@ MODULE m_dmft_lattice_bse
    complex(dp), allocatable :: chi0_k_mp(:,:)
    ! chi0_k_mp(nboson, nkpt) : S-S+ trace per k-point
 
+   complex(dp), allocatable :: chi0_k_pm_orb(:,:,:,:)
+   ! chi0_k_pm_orb(nboson, nkpt, ndim_orb, ndim_orb) :
+   ! Per-k orbital-resolved S+S- susceptibility.
+   ! chi0_k_pm_orb(iOm, ik, m, m') =
+   !   sum_n (-beta * wk) G^loc_{(m',down),(m,up)}(k,iwn) G^loc_{(m,up),(m',down)}(k,iwn+iOm)
+
+   complex(dp), allocatable :: chi0_k_mp_orb(:,:,:,:)
+   ! chi0_k_mp_orb(nboson, nkpt, ndim_orb, ndim_orb) :
+   ! Per-k orbital-resolved S-S+ susceptibility.
+
  end type kpoint_chi0_attrib_type
 
 !!***
@@ -275,7 +285,7 @@ subroutine compute_chi0_lattice(lbse, green_imp, paw_dmft, sproj, &
  integer :: ialpha, ibeta, igamma, idelta
  integer :: norb_sq, idx_i, idx_j
  integer :: mbandc
- integer :: ispin_a, ispin_b, ndim_orb
+ integer :: ispin_a, ispin_b, ndim_orb, im_a, im_b
  logical :: ladd_local, do_kpt_attrib
  real(dp) :: beta, wk
  complex(dp) :: bubble_contrib
@@ -344,6 +354,8 @@ subroutine compute_chi0_lattice(lbse, green_imp, paw_dmft, sproj, &
      kpt_attrib%chi0_k_sc = czero
      kpt_attrib%chi0_k_pm = czero
      kpt_attrib%chi0_k_mp = czero
+     kpt_attrib%chi0_k_pm_orb = czero
+     kpt_attrib%chi0_k_mp_orb = czero
    end if
  end if
 
@@ -440,9 +452,19 @@ subroutine compute_chi0_lattice(lbse, green_imp, paw_dmft, sproj, &
               else if (ispin_a == 1 .and. ispin_b == 2) then
                 kpt_attrib%chi0_k_pm(iom, ik) = &
                   kpt_attrib%chi0_k_pm(iom, ik) + bubble_contrib
+                ! Orbital-resolved S+S-: alpha=(m,up), beta=(m',down)
+                im_a = ialpha              ! orbital index for spin-up part
+                im_b = ibeta - ndim_orb    ! orbital index for spin-down part
+                kpt_attrib%chi0_k_pm_orb(iom, ik, im_a, im_b) = &
+                  kpt_attrib%chi0_k_pm_orb(iom, ik, im_a, im_b) + bubble_contrib
               else if (ispin_a == 2 .and. ispin_b == 1) then
                 kpt_attrib%chi0_k_mp(iom, ik) = &
                   kpt_attrib%chi0_k_mp(iom, ik) + bubble_contrib
+                ! Orbital-resolved S-S+: alpha=(m,down), beta=(m',up)
+                im_a = ialpha - ndim_orb   ! orbital index for spin-down part
+                im_b = ibeta               ! orbital index for spin-up part
+                kpt_attrib%chi0_k_mp_orb(iom, ik, im_a, im_b) = &
+                  kpt_attrib%chi0_k_mp_orb(iom, ik, im_a, im_b) + bubble_contrib
               end if
             end do
           end do
@@ -582,11 +604,15 @@ subroutine init_kpoint_chi0_attrib(kattr, nboson, nkpt, ndim_orb, nspinor)
  ABI_MALLOC(kattr%chi0_k_sc, (nboson, nkpt))
  ABI_MALLOC(kattr%chi0_k_pm, (nboson, nkpt))
  ABI_MALLOC(kattr%chi0_k_mp, (nboson, nkpt))
+ ABI_MALLOC(kattr%chi0_k_pm_orb, (nboson, nkpt, ndim_orb, ndim_orb))
+ ABI_MALLOC(kattr%chi0_k_mp_orb, (nboson, nkpt, ndim_orb, ndim_orb))
 
  kattr%chi0_k_total = czero
  kattr%chi0_k_sc = czero
  kattr%chi0_k_pm = czero
  kattr%chi0_k_mp = czero
+ kattr%chi0_k_pm_orb = czero
+ kattr%chi0_k_mp_orb = czero
 
 end subroutine init_kpoint_chi0_attrib
 
@@ -618,6 +644,12 @@ subroutine destroy_kpoint_chi0_attrib(kattr)
  end if
  if (allocated(kattr%chi0_k_mp)) then
    ABI_FREE(kattr%chi0_k_mp)
+ end if
+ if (allocated(kattr%chi0_k_pm_orb)) then
+   ABI_FREE(kattr%chi0_k_pm_orb)
+ end if
+ if (allocated(kattr%chi0_k_mp_orb)) then
+   ABI_FREE(kattr%chi0_k_mp_orb)
  end if
 
  kattr%nboson = 0
@@ -659,8 +691,11 @@ subroutine write_kpoint_chi0_attrib(kattr, paw_dmft, kpt_coords, fname, beta)
  real(dp), intent(in) :: beta
 
 !Local variables
- integer :: unt, iom, ik, ios
- real(dp) :: omega_boson
+ integer :: unt, iom, ik, ios, im, imp
+ integer :: nentries, nrank, ientry, ii, jj, tmp_int
+ integer, allocatable :: rank_ik(:), rank_im(:), rank_imp(:)
+ real(dp) :: omega_boson, tmp_val
+ real(dp), allocatable :: rank_val(:)
  character(len=500) :: msg
 
 ! *********************************************************************
@@ -710,6 +745,85 @@ subroutine write_kpoint_chi0_attrib(kattr, paw_dmft, kpt_coords, fname, beta)
      abs(kattr%chi0_k_pm(1, ik)), &
      real(kattr%chi0_k_pm(1, ik)), aimag(kattr%chi0_k_pm(1, ik))
  end do
+
+ ! --- Section 3: Per-k orbital-resolved S+S- at iOm=0 ---
+ if (allocated(kattr%chi0_k_pm_orb)) then
+   write(unt,'(a)')
+   write(unt,'(a)') '# === Section 3: Per-k orbital-resolved S+S- at iOm=0 ==='
+   write(unt,'(a)') '# For each k-point, the orbital-pair decomposition of the S+S-'
+   write(unt,'(a)') '# spin-flip susceptibility at the static limit.'
+   write(unt,'(a)') '# ik  kx  ky  kz  m  m_prime  Re(chi0_pm_orb)  Im(chi0_pm_orb)  |chi0_pm_orb|'
+
+   do ik = 1, kattr%nkpt
+     do im = 1, kattr%ndim_orb
+       do imp = 1, kattr%ndim_orb
+         write(unt,'(i6,3f10.5,2i4,2es18.8,es16.6)') &
+           ik, kpt_coords(1,ik), kpt_coords(2,ik), kpt_coords(3,ik), &
+           im, imp, &
+           real(kattr%chi0_k_pm_orb(1, ik, im, imp)), &
+           aimag(kattr%chi0_k_pm_orb(1, ik, im, imp)), &
+           abs(kattr%chi0_k_pm_orb(1, ik, im, imp))
+       end do
+     end do
+   end do
+ end if
+
+ ! --- Section 4: Global ranking of dominant (k, m, m') for S+S- at iOm=0 ---
+ if (allocated(kattr%chi0_k_pm_orb)) then
+   write(unt,'(a)')
+   write(unt,'(a)') '# === Section 4: Global ranking of dominant (k, m, m_prime) for S+S- at iOm=0 ==='
+   write(unt,'(a)') '# Identifies which k-point and orbital transition contributes most'
+   write(unt,'(a)') '# to the spin-flip susceptibility.'
+   write(unt,'(a)') '# Rank  ik  kx  ky  kz  m  m_prime  |chi0_pm_orb|  Re  Im'
+
+   nentries = kattr%nkpt * kattr%ndim_orb * kattr%ndim_orb
+   nrank = min(nentries, 20)
+
+   ABI_MALLOC(rank_ik, (nentries))
+   ABI_MALLOC(rank_im, (nentries))
+   ABI_MALLOC(rank_imp, (nentries))
+   ABI_MALLOC(rank_val, (nentries))
+
+   ientry = 0
+   do ik = 1, kattr%nkpt
+     do im = 1, kattr%ndim_orb
+       do imp = 1, kattr%ndim_orb
+         ientry = ientry + 1
+         rank_ik(ientry) = ik
+         rank_im(ientry) = im
+         rank_imp(ientry) = imp
+         rank_val(ientry) = abs(kattr%chi0_k_pm_orb(1, ik, im, imp))
+       end do
+     end do
+   end do
+
+   ! Sort by magnitude in descending order (partial insertion sort for top nrank)
+   do ii = 1, nrank
+     do jj = ii + 1, nentries
+       if (rank_val(jj) > rank_val(ii)) then
+         tmp_val = rank_val(ii); rank_val(ii) = rank_val(jj); rank_val(jj) = tmp_val
+         tmp_int = rank_ik(ii); rank_ik(ii) = rank_ik(jj); rank_ik(jj) = tmp_int
+         tmp_int = rank_im(ii); rank_im(ii) = rank_im(jj); rank_im(jj) = tmp_int
+         tmp_int = rank_imp(ii); rank_imp(ii) = rank_imp(jj); rank_imp(jj) = tmp_int
+       end if
+     end do
+   end do
+
+   do ientry = 1, nrank
+     ik = rank_ik(ientry)
+     write(unt,'(i6,i6,3f10.5,2i4,es16.6,2es18.8)') &
+       ientry, ik, &
+       kpt_coords(1,ik), kpt_coords(2,ik), kpt_coords(3,ik), &
+       rank_im(ientry), rank_imp(ientry), rank_val(ientry), &
+       real(kattr%chi0_k_pm_orb(1, ik, rank_im(ientry), rank_imp(ientry))), &
+       aimag(kattr%chi0_k_pm_orb(1, ik, rank_im(ientry), rank_imp(ientry)))
+   end do
+
+   ABI_FREE(rank_ik)
+   ABI_FREE(rank_im)
+   ABI_FREE(rank_imp)
+   ABI_FREE(rank_val)
+ end if
 
  close(unt)
 

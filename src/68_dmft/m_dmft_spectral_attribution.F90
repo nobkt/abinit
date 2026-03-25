@@ -885,7 +885,8 @@ subroutine write_frequency_profile(attrib, fname, beta)
  real(dp) :: omega_boson, abs_total, abs_sc, abs_pm, abs_mp
  real(dp) :: frac_sc, frac_pm, frac_mp
  real(dp) :: max_pm_val, max_mp_val, cur_val
- character(len=20) :: dominant_channel
+ integer :: nchannel_changes
+ character(len=20) :: dominant_channel, current_channel
  character(len=500) :: msg
 
 ! *********************************************************************
@@ -1031,30 +1032,30 @@ subroutine write_frequency_profile(attrib, fname, beta)
    write(unt,'(a,a)') '# Dominant channel at iOm=0: ', trim(dominant_channel)
 
    ! Count frequency points where dominant channel differs
-   im = 0  ! reuse as counter for channel changes
+   nchannel_changes = 0
    do iom = 2, nboson
      abs_sc = abs(attrib%chi_spin_conserving(iom))
      abs_pm = abs(attrib%chi_spin_flip_pm(iom))
      abs_mp = abs(attrib%chi_spin_flip_mp(iom))
 
      if (abs_sc >= abs_pm .and. abs_sc >= abs_mp) then
-       msg = 'spin-conserving'
+       current_channel = 'spin-conserving'
      else if (abs_pm >= abs_sc .and. abs_pm >= abs_mp) then
-       msg = 'S+S-'
+       current_channel = 'S+S-'
      else
-       msg = 'S-S+'
+       current_channel = 'S-S+'
      end if
 
-     if (trim(msg(1:20)) /= trim(dominant_channel)) then
-       im = im + 1
+     if (trim(current_channel) /= trim(dominant_channel)) then
+       nchannel_changes = nchannel_changes + 1
      end if
    end do
 
-   if (im == 0) then
+   if (nchannel_changes == 0) then
      write(unt,'(a)') '# Dominant channel is CONSISTENT across all bosonic frequencies.'
      write(unt,'(a)') '# This indicates a single excitation mechanism dominates at all energy scales.'
    else
-     write(unt,'(a,i4,a,i4,a)') '# Dominant channel CHANGES at ', im, ' of ', nboson - 1, &
+     write(unt,'(a,i4,a,i4,a)') '# Dominant channel CHANGES at ', nchannel_changes, ' of ', nboson - 1, &
        ' frequency points.'
      write(unt,'(a)') '# This indicates MULTIPLE excitation mechanisms at different energy scales.'
      write(unt,'(a)') '# Inspect Section 1 for the frequency-resolved breakdown.'

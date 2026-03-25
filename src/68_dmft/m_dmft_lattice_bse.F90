@@ -797,7 +797,8 @@ subroutine write_kpoint_chi0_attrib(kattr, paw_dmft, kpt_coords, fname, beta)
      end do
    end do
 
-   ! Sort by magnitude in descending order (partial insertion sort for top nrank)
+   ! Sort by magnitude in descending order (partial selection sort for top nrank entries)
+   ! Complexity: O(nrank * nentries); nrank=20 is fixed, so effectively O(nentries).
    do ii = 1, nrank
      do jj = ii + 1, nentries
        if (rank_val(jj) > rank_val(ii)) then

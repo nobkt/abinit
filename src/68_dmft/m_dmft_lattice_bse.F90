@@ -35,6 +35,7 @@ MODULE m_dmft_lattice_bse
 
  use m_hide_lapack, only : xginv
  use m_abi_linalg, only : abi_zgemm_2dd
+ use m_xmpi, only : xmpi_sum
  use m_paw_dmft, only : paw_dmft_type
  use m_green, only : green_type
  use m_dmft_vertex, only : vertex_irr_type
@@ -284,7 +285,7 @@ subroutine compute_chi0_lattice(lbse, green_imp, paw_dmft, sproj, &
  integer :: iom, iw, iw_shifted, ik, iw_max
  integer :: ialpha, ibeta, igamma, idelta
  integer :: norb_sq, idx_i, idx_j
- integer :: mbandc
+ integer :: mbandc, ierr
  integer :: ispin_a, ispin_b, ndim_orb, im_a, im_b
  logical :: ladd_local, do_kpt_attrib
  real(dp) :: beta, wk
@@ -374,6 +375,8 @@ subroutine compute_chi0_lattice(lbse, green_imp, paw_dmft, sproj, &
      iw_shifted = iw + (iom - 1)
 
      do ik = 1, lbse%nkpt
+       ! --- MPI k-point distribution: skip k-points not owned by this process ---
+       if (paw_dmft%distrib%procb(ik) /= paw_dmft%distrib%me_kpt) cycle
        wk = paw_dmft%wtk(ik)
 
        ! Extract projector for this k-point
@@ -472,6 +475,19 @@ subroutine compute_chi0_lattice(lbse, green_imp, paw_dmft, sproj, &
      end do  ! ik
    end do  ! iw
  end do  ! iom
+
+ ! --- MPI reduction over k-points ---
+ ! Each process computed its share of k-points; now sum across all processes
+ ! in the k-point communicator to get the full k-point average.
+ call xmpi_sum(lbse%chi0_latt, paw_dmft%distrib%comm_kpt, ierr)
+ if (do_kpt_attrib .and. paw_dmft%nspinor == 2) then
+   call xmpi_sum(kpt_attrib%chi0_k_total, paw_dmft%distrib%comm_kpt, ierr)
+   call xmpi_sum(kpt_attrib%chi0_k_sc, paw_dmft%distrib%comm_kpt, ierr)
+   call xmpi_sum(kpt_attrib%chi0_k_pm, paw_dmft%distrib%comm_kpt, ierr)
+   call xmpi_sum(kpt_attrib%chi0_k_mp, paw_dmft%distrib%comm_kpt, ierr)
+   call xmpi_sum(kpt_attrib%chi0_k_pm_orb, paw_dmft%distrib%comm_kpt, ierr)
+   call xmpi_sum(kpt_attrib%chi0_k_mp_orb, paw_dmft%distrib%comm_kpt, ierr)
+ end if
 
  ABI_FREE(gloc_n)
  ABI_FREE(gloc_np)

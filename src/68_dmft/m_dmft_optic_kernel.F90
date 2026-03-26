@@ -41,6 +41,7 @@ MODULE m_dmft_optic_kernel
 
  use m_paw_dmft, only : paw_dmft_type
  use m_green, only : green_type
+ use m_xmpi, only : xmpi_sum
  use m_dmft_spinor_proj, only : spinor_proj_type
 
  implicit none
@@ -275,7 +276,7 @@ subroutine compute_bubble_conductivity(optic, paw_dmft, green_imp, nboson, niw_v
 
 !Local variables
  character(len=500) :: msg
- integer :: iom, iw, ikpt, isppol
+ integer :: iom, iw, ikpt, isppol, ierr
  integer :: ia, ib, ic, id, mu, nu
  integer :: mbandc, nkpt
  real(dp) :: beta, wk
@@ -342,6 +343,8 @@ subroutine compute_bubble_conductivity(optic, paw_dmft, green_imp, nboson, niw_v
  ! Pi_mu_nu(iOm) = -(1/(beta*Nk)) sum_k sum_n Tr[j_mu G(iw_n) j_nu G(iw_n+iOm)]
  do isppol = 1, paw_dmft%nsppol
    do ikpt = 1, nkpt
+     ! --- MPI k-point distribution: skip k-points not owned by this process ---
+     if (paw_dmft%distrib%procb(ikpt) /= paw_dmft%distrib%me_kpt) cycle
      wk = paw_dmft%wtk(ikpt)
 
      do iom = 1, nboson
@@ -443,6 +446,14 @@ subroutine compute_bubble_conductivity(optic, paw_dmft, green_imp, nboson, niw_v
      end do ! iom (bosonic frequency)
    end do ! ikpt
  end do ! isppol
+
+ ! --- MPI reduction over k-points ---
+ call xmpi_sum(optic%pi_bubble, paw_dmft%distrib%comm_kpt, ierr)
+ if (do_spin_decomp) then
+   call xmpi_sum(optic%pi_bubble_sc, paw_dmft%distrib%comm_kpt, ierr)
+   call xmpi_sum(optic%pi_bubble_pm, paw_dmft%distrib%comm_kpt, ierr)
+   call xmpi_sum(optic%pi_bubble_mp, paw_dmft%distrib%comm_kpt, ierr)
+ end if
 
  ! Set total = bubble (vertex correction is zero until TRIQS interface is connected)
  optic%pi_total = optic%pi_bubble
@@ -720,7 +731,7 @@ subroutine compute_optic_orbital_attrib(orb_attrib, paw_dmft, green_imp, sproj, 
 
 !Local variables
  character(len=500) :: msg
- integer :: iom, iw, ikpt, isppol, mu, nu
+ integer :: iom, iw, ikpt, isppol, mu, nu, ierr
  integer :: ialpha, idelta, ispin_a, ispin_d, im_a, im_d
  integer :: mbandc, nkpt, norb_corr
  real(dp) :: beta, wk
@@ -799,6 +810,8 @@ subroutine compute_optic_orbital_attrib(orb_attrib, paw_dmft, green_imp, sproj, 
 
  do isppol = 1, paw_dmft%nsppol
    do ikpt = 1, nkpt
+     ! --- MPI k-point distribution: skip k-points not owned by this process ---
+     if (paw_dmft%distrib%procb(ikpt) /= paw_dmft%distrib%me_kpt) cycle
      wk = paw_dmft%wtk(ikpt)
 
      ! Extract projector for this k-point: P(alpha, a)
@@ -898,6 +911,12 @@ subroutine compute_optic_orbital_attrib(orb_attrib, paw_dmft, green_imp, sproj, 
      end do ! iom
    end do ! ikpt
  end do ! isppol
+
+ ! --- MPI reduction over k-points ---
+ call xmpi_sum(orb_attrib%pi_projected_total, paw_dmft%distrib%comm_kpt, ierr)
+ call xmpi_sum(orb_attrib%pi_projected_sc, paw_dmft%distrib%comm_kpt, ierr)
+ call xmpi_sum(orb_attrib%pi_orb_pm, paw_dmft%distrib%comm_kpt, ierr)
+ call xmpi_sum(orb_attrib%pi_orb_mp, paw_dmft%distrib%comm_kpt, ierr)
 
  ABI_FREE(proj_k)
  ABI_FREE(jmu_ks)

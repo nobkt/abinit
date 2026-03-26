@@ -1082,3 +1082,257 @@ Phase 21 で実装したバブル光学伝導度のスピンチャネル分解�
 | `DMFT_attrib_comparison.dat` | レベル間比較 | 不純物/格子/BSE の3段階比較（差分付き） |
 | `DMFT_optic_kernel.dat` | バブル光学伝導度 | Π_μν テンソルのスピンチャネル分解（SC/S⁺S⁻/S⁻S⁺） |
 | `DMFT_attrib_optic_orbital.dat` | 光学伝導度（軌道分解）[NEW] | カバー率、軌道ペア分解、ランキング、周波数依存性 |
+
+---
+
+## Phase 25: TRIQS 二粒子測定インターフェース（完了）
+
+### 23. TRIQS/CT-HYB G2_iw_ph 測定インターフェース（Phase 25: 完了）
+
+**目的:** TRIQS/CT-HYB ソルバーの `measure_G2_iw_ph` 機能を通じて、不純物二粒子相関関数 χ^imp を取得するためのインターフェースを実装する。これにより、既約頂点 Γ がゼロではない物理的に意味のある値を持つようになり、BSE の結果がバブル近似を超えた多体効果を反映する。
+
+**背景:**
+
+Phase 24 までの実装で、バブル近似レベルの全計算パイプライン（不純物バブル → 格子バブル → BSE → 光学伝導度 → 帰属分解）は完成していた。しかし、BSE に入力される既約頂点 Γ^imp は常にゼロであり（χ^imp が未測定のため）、BSE の出力はバブル近似と等価であった。
+
+設計書 Section 5.7 で定義される局所二粒子相関関数:
+
+```
+χ^imp_{αβγδ}(iω_n, iω_n'; iΩ_m) = -<T c†_α(τ₁) c_β(τ₂) c†_γ(τ₃) c_δ(0)>_connected
+```
+
+は、TRIQS/CT-HYB の `measure_G2_iw_ph` で測定される G2_iw_ph と符号を除いて同一である（χ = -G2）。この符号規約は Rohringer et al., Rev. Mod. Phys. 90, 025003 (2018) に準拠する。
+
+**実装した内容:**
+
+1. **`paw_dmft_type` への G2 格納フィールドの追加** (`m_paw_dmft.F90`):
+   - `has_chi_imp_g2` — 測定状態フラグ（0: 未測定、1: 測定済み）
+   - `chi_imp_g2_nboson` — 測定に使用したボソン Matsubara 周波数数
+   - `chi_imp_g2_niw` — 測定に使用したフェルミ Matsubara 周波数数
+   - `chi_imp_g2_norb` — フレーバー数（= nspinor × (2×lpawu+1)）
+   - `chi_imp_g2_data(:)` — G2 データのフラット化配列
+
+   データレイアウト:
+   ```
+   index = ((((iOm*niw + iw)*niw + iwp)*norb + α)*norb + β)*norb² + γ*norb + δ
+   ```
+   0-based インデックス。配列サイズ: nboson × niw² × norb⁴
+
+2. **C++ ソルバーインターフェースの拡張** (`triqs_cthyb_qmc.cpp`, `triqs_cthyb_qmc.hpp`):
+   - `ctqmc_triqs_run` 関数に5つの新パラメータを追加:
+     - `bool measure_g2` — G2 測定の有効/無効
+     - `int g2_n_bosonic` — ボソン周波数数
+     - `int g2_n_fermionic` — フェルミ周波数数
+     - `complex<double> *g2_data` — 出力データポインタ
+     - `int g2_data_size` — 出力配列サイズ
+   - ソルバーパラメータ設定:
+     ```cpp
+     paramCTQMC.measure_G2_iw_ph = true;
+     paramCTQMC.measure_G2_n_bosonic = g2_n_bosonic;
+     paramCTQMC.measure_G2_n_fermionic = g2_n_fermionic;
+     ```
+   - `solver.solve()` 後の G2 データ抽出: TRIQS の Block2Gf 構造からフラット配列へのブロック→フレーバー添字変換を実装。正の周波数のみを抽出:
+     - ボソン: メッシュインデックス `g2_n_bosonic + iOm` (Ω=0 が `g2_n_bosonic`)
+     - フェルミ: メッシュインデックス `g2_n_fermionic + iw` (ω₀ が `g2_n_fermionic`)
+
+3. **Fortran ISO_C_BINDING の更新** (`triqs_interface_ctqmc.F90`):
+   - `Ctqmc_triqs_run` の `bind(c)` インターフェースに新パラメータを追加:
+     - `LOGICAL, VALUE :: measure_g2`
+     - `INTEGER, VALUE :: g2_n_bosonic, g2_n_fermionic, g2_data_size`
+     - `TYPE(C_PTR), VALUE :: g2_data`
+
+4. **Fortran ラッパーの更新** (`m_forctqmc.F90`):
+   - `ctqmc_calltriqs_c` に `optional :: measure_g2` フラグを追加
+   - G2 測定パラメータを `paw_dmft` から読み取り
+   - G2 バッファの動的確保と C ポインタへの変換
+   - ソルバー呼び出し後、G2 データを `paw_dmft%chi_imp_g2_data` にコピー
+   - `paw_dmft%has_chi_imp_g2 = 1` のフラグ設定
+
+5. **G2 → chi_loc 変換ルーチン** (`m_dmft_two_particle.F90`):
+   - `fill_chi_loc_from_g2` サブルーチンの新規追加
+   - G2 フラット配列を chi_loc_type の複合添字形式に変換
+   - 符号規約: χ = -G2（設計書 Section 5.7 の規約に準拠）
+   - 次元整合性の検証（norb, niw, nboson の一致チェック）
+
+6. **DMFT ドライバへの G2 測定呼び出し追加** (`m_dmft.F90`):
+   - DMFT 自己無撞着ループ収束後、Green 関数が破壊される前に、G2 測定付きで不純物ソルバーを再実行:
+     ```fortran
+     if (dtset%dmft_resp_current_vertex == 1 .and. &
+       & (paw_dmft%dmft_solv == 6 .or. paw_dmft%dmft_solv == 7)) then
+       paw_dmft%chi_imp_g2_nboson = dtset%dmft_resp_nboson
+       paw_dmft%chi_imp_g2_niw = dtset%dmft_resp_niw_vertex
+       call ctqmc_calltriqs_c(..., measure_g2=.true.)
+     end if
+     ```
+   - 設計書 Section 9.2 に従い、収束した不純物浴を固定して二粒子測定のみを実行する
+
+7. **吸収ドライバの Stage 2 更新** (`m_dmft_absorption_driver.F90`):
+   - `paw_dmft%has_chi_imp_g2 == 1` の場合、G2 データから chi_loc を充填
+   - 次元不整合（norb, nboson, niw のいずれかが一致しない場合）は WARNING を出力し、chi_loc をゼロのまま維持（ヒューリスティックな補間は行わない）
+   - 測定された chi_imp を `DMFT_chi_imp_measured.dat` として出力
+   - G2 データが利用できない場合は従来通り WARNING を出力し、バブル近似を使用
+
+**データフローの変更:**
+
+```
+vtorho
+  ├── datafordmft → chipsi, eigen_dft を paw_dmft に格納
+  ├── compute_psinablapsi_dmft → 速度行列要素を paw_dmft に格納
+  └── dmft_solve
+        ├── DMFT self-consistent loop (既存)
+        │     └── impurity_solve → ctqmc_calltriqs_c (通常の一粒子測定)
+        ├── G2 measurement (NEW) → ctqmc_calltriqs_c(measure_g2=.true.)
+        │     └── G2 data → paw_dmft%chi_imp_g2_data
+        └── dmft_absorption_run
+              └── Stage 2: fill_chi_loc_from_g2(chi_loc, paw_dmft%chi_imp_g2_data)
+```
+
+**Fourier 規約の整合性:**
+
+TRIQS/CT-HYB の G2_iw_ph と設計書 Section 5.7 の χ^imp は同一の Fourier 規約を使用している:
+- τ₄ = 0 固定の粒子正孔チャネル
+- Fourier 因子: e^{-iω_nτ₁} e^{i(ω_n+Ω_m)τ₂} e^{-i(ω_n'+Ω_m)τ₃}
+- 唯一の差異は全体の符号: χ = -G2
+
+この規約の整合性は、Rohringer et al. (2018) の定義と TRIQS/CT-HYB のドキュメントの両方を参照して確認した。
+
+**出力ファイル:**
+
+| ファイル名 | 内容 |
+| --- | --- |
+| `DMFT_chi_imp_measured.dat` | TRIQS から測定された χ^imp（G2 データが利用可能な場合のみ出力） |
+
+**変更ファイル:**
+- `src/65_paw/m_paw_dmft.F90` — G2 格納フィールド追加、destroy 更新
+- `src/67_triqs_ext/triqs_cthyb_qmc.cpp` — G2 測定パラメータ、データ抽出追加
+- `src/67_triqs_ext/triqs_cthyb_qmc.hpp` — 関数宣言更新
+- `src/67_triqs_ext/triqs_interface_ctqmc.F90` — ISO_C_BINDING インターフェース更新
+- `src/68_dmft/m_forctqmc.F90` — measure_g2 オプション追加、G2 バッファ管理
+- `src/68_dmft/m_dmft_two_particle.F90` — fill_chi_loc_from_g2 追加
+- `src/68_dmft/m_dmft.F90` — G2 測定呼び出し追加
+- `src/68_dmft/m_dmft_absorption_driver.F90` — Stage 2 更新、use 文更新
+
+### 正直な到達点の評価（Phase 25 時点）
+
+**現時点で完成しているもの:**
+- 入力変数体系と整合性検査
+- 全モジュールのデータ構造定義
+- **不純物バブル χ₀^imp の完全な計算**
+- **多原子サポート**
+- **スピンチャネル帰属分解**（3チャネルへの厳密分解）
+- **軌道分解帰属**
+- **スピノル投影子の chipsi 接続**
+- **格子バブル χ₀^latt の完全な計算**
+- **多原子格子バブル**
+- **格子レベル帰属分解**
+- **レベル間帰属比較**
+- **帰属サマリーの物理量抽出**
+- **k 点分解格子バブル帰属**
+- **k 点分解軌道ペア帰属**
+- **周波数依存帰属プロファイル**
+- 既約頂点抽出の行列演算
+- 格子 BSE 解法の行列演算
+- Matsubara 軸での出力フォーマット
+- 高水準ドライバによる全ステージのオーケストレーション
+- DMFT ループから吸収計算ドライバへの呼び出し接続
+- **運動量行列要素 <ψ_a|−i∇|ψ_b> の計算**
+- **バブル光学伝導度 Π_μν^bubble の完全な計算**
+- **光学伝導度のスピンチャネル帰属分解**
+- **PAW nabla_ij の自動初期化**
+- **光学伝導度の軌道ペア分解**
+- **TRIQS G2_iw_ph 測定インターフェース** [NEW]
+- **G2 → chi_loc 変換** [NEW]
+- **DMFT 収束後の G2 測定呼び出し** [NEW]
+
+**インターフェースは完成しているが、実際の動作確認には以下が必要:**
+
+1. **TRIQS/CT-HYB ライブラリのコンパイル環境**: G2 測定の C++ コードは `HAVE_TRIQS_INTERNAL || HAVE_TRIQS_v3_2` のプリプロセッサガードに囲まれており、TRIQS なしでもコンパイルは通るが、実際の G2 測定は TRIQS 環境でのみ動作する。
+
+2. **TRIQS G2_iw_ph API の詳細検証**: TRIQS バージョン間で G2_iw_ph のブロック構造やメッシュ規約に差異がある可能性がある。特に:
+   - `solver.G2_iw_ph` のアクセスパス（ポインタ vs 値返却）
+   - Block2Gf のデータレイアウト（行優先 vs 列優先）
+   - ボソン/フェルミメッシュのインデックス規約（0-based vs 1-based）
+   これらは TRIQS ソースコードとの突き合わせが必要であり、本実装は TRIQS 3.x のドキュメントに基づいている。
+
+3. **メモリ管理**: Mn 3d（norb=10）で nboson=10, niw=20 の場合、G2 データサイズは 10 × 20² × 10⁴ = 40M 複素数 = 640 MB。これは実用的な上限に近く、大規模なパラメータセットではメモリ不足になる可能性がある。
+
+**現時点で完成していないもの:**
+
+1. **TRIQS G2_iw_ph API の実テスト**: コンパイル環境の制約により、G2 データ抽出ロジックの実行時検証は未完了。特に Block2Gf のデータアクセスパス `(*solver.G2_iw_ph)(ib1, ib2).data()(...)` の正確性は TRIQS 環境でのテストが必要。
+
+2. **k 点並列化**: `compute_bubble_conductivity`、`compute_chi0_lattice`、`compute_optic_orbital_attrib` の MPI 並列化。大規模 k 点メッシュでの実用計算には不可避。
+
+3. **実周波数応答バックエンド**: `dmft_resp_mode=2` の実装。これがない限り、厳密な意味での吸収スペクトル α(ω) は完成しない。
+
+---
+
+## 次ステップで実装すべきこと
+
+### 次ステップ 0: TRIQS G2 インターフェースの実テスト（最優先）
+
+**目的:** Phase 25 で実装した G2 測定インターフェースを TRIQS 環境で実際にテストし、データ抽出が正しく動作することを確認する。
+
+**具体的な検証項目:**
+
+1. `solver.G2_iw_ph` へのアクセスが正しいこと（ポインタデリファレンスとブロックアクセス）
+2. ボソン/フェルミメッシュのインデックスオフセットが正しいこと:
+   - ボソン: メッシュインデックス `g2_n_bosonic` が Ω=0 に対応すること
+   - フェルミ: メッシュインデックス `g2_n_fermionic` が ω₀ に対応すること
+3. `data()` テンソルの添字順序が (bos, fer, fer, o1, o2, o3, o4) であること
+4. `flavor_list` によるブロック→グローバルフレーバー添字変換が正しいこと
+5. 符号規約 χ = -G2 の検証: 既知の原子極限解（U=0 で χ = χ₀）との比較
+6. メモリ使用量の実測（小さなパラメータセットでの確認）
+
+**必要条件:** TRIQS/CT-HYB がインストールされた計算環境と MnF₂ テスト入力ファイル
+
+### 次ステップ 1: k 点並列化
+
+**目的:** 格子バブル計算と光学伝導度計算のスケーラビリティ確保
+
+**必要な作業:**
+1. `compute_chi0_lattice` の k 点ループを MPI で分散
+2. `compute_bubble_conductivity` の k 点ループを MPI で分散
+3. `compute_optic_orbital_attrib` の k 点ループを MPI で分散
+4. 既存の ABINIT MPI 分散機構（`mpi_enreg%my_kpttab` 等）を利用
+5. k 点合算の MPI_ALLREDUCE 追加
+6. k 点帰属データの MPI 集約
+
+**技術的考慮:**
+- ABINIT の既存 k 点並列化は `proc_distrb` テーブルで管理されている
+- `compute_chi0_lattice` のフェルミ周波数ループは k 点ループの内側にあり、通信回数の最小化が必要
+- 帰属データ（kpt_attrib）は各 k 点で独立に計算されるため、並列化は自然
+
+### 次ステップ 2: 実周波数応答バックエンド（最難関）
+
+**目的:** `dmft_resp_mode=2` の実装
+
+**候補手法:**
+- 数値的解析接続は設計書で禁止されている（MaxEnt, Padé いずれも不可）
+- 許されるのは:
+  - (A) 実周波数の不純物応答を直接計算する補助ソルバー（例: NRG, ED, iPT）
+  - (B) Lehmann 表示を明示的に用いる定式化
+- 設計書の推奨は方針 A
+
+**この段階に到達するまでは、Matsubara 軸応答（dmft_resp_mode=1）までの出力に留める。**
+
+---
+
+## 帰属出力ファイル一覧（Phase 25 時点）
+
+| ファイル名 | レベル | 内容 |
+| --- | --- | --- |
+| `DMFT_attrib_chi0_imp_atom{N}.dat` | 不純物（原子別） | 原子 N の chi0_imp のスピン/軌道帰属 |
+| `DMFT_attrib_chi0_imp_total.dat` | 不純物（合算） | 全原子合算の chi0_imp のスピン/軌道帰属 |
+| `DMFT_attrib_summary_imp.dat` | 不純物サマリー | 静的感受率・チャネル分率・収束診断・軌道ランキング |
+| `DMFT_attrib_freqprofile_imp.dat` | 不純物プロファイル | 周波数依存帰属プロファイル（支配チャネル/軌道） |
+| `DMFT_attrib_chi0_lattice.dat` | 格子バブル | 格子バブル chi0_latt のスピン/軌道帰属 |
+| `DMFT_attrib_chi0_kpoint.dat` | 格子バブル（k分解） | k 点分解スピンチャネル + 軌道ペア分解 + ランキング |
+| `DMFT_attrib_summary_latt.dat` | 格子サマリー | 格子レベルの静的感受率・軌道ランキング |
+| `DMFT_attrib_freqprofile_latt.dat` | 格子プロファイル | 周波数依存帰属プロファイル（支配チャネル/軌道） |
+| `DMFT_attrib_chi_full.dat` | BSE 全感受率 | BSE 補正後 chi_full のスピン/軌道帰属 |
+| `DMFT_attrib_summary_bse.dat` | BSE サマリー | BSE レベルの静的感受率・軌道ランキング |
+| `DMFT_attrib_freqprofile_bse.dat` | BSE プロファイル | 周波数依存帰属プロファイル（支配チャネル/軌道） |
+| `DMFT_attrib_comparison.dat` | レベル間比較 | 不純物/格子/BSE の3段階比較（差分付き） |
+| `DMFT_optic_kernel.dat` | バブル光学伝導度 | Π_μν テンソルのスピンチャネル分解（SC/S⁺S⁻/S⁻S⁺） |
+| `DMFT_attrib_optic_orbital.dat` | 光学伝導度（軌道分解） | カバー率、軌道ペア分解、ランキング、周波数依存性 |
+| `DMFT_chi_imp_measured.dat` | 測定 χ^imp [NEW] | TRIQS G2_iw_ph から変換された不純物二粒子相関関数 |

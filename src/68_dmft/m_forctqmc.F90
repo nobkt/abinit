@@ -3413,6 +3413,12 @@ subroutine ctqmc_calltriqs_c(paw_dmft,green,self,hu,weiss,self_new,pawprtvol,mea
        ! Total size: nboson * niw^2 * norb^4
        g2_data_size = int(g2_n_bosonic,C_LONG_LONG) * int(g2_n_fermionic,C_LONG_LONG) &
          & * int(g2_n_fermionic,C_LONG_LONG) * int(nflavor_max,C_LONG_LONG)**4
+       if (g2_data_size > int(huge(g2_data_size_int),C_LONG_LONG)) then
+         write(message,'(a,i20,a)') &
+         '  G2 data_size=', g2_data_size, &
+         ' exceeds 32-bit integer limit. Reduce nboson/niw/norb.'
+         ABI_ERROR(message)
+       end if
        g2_data_size_int = int(g2_data_size)
        write(message,'(a,i4,a,i4,a,i12)') &
        '  G2 measurement: nboson=', g2_n_bosonic, ' niw=', g2_n_fermionic, &

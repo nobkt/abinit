@@ -421,7 +421,11 @@ void ctqmc_triqs_run(bool rot_inv, bool leg_measure, bool move_shift, bool move_
                                       + (long long)f2 * num_orbitals * num_orbitals
                                       + (long long)f3 * num_orbitals + f4;
 
-                      if (idx >= 0 && idx < g2_data_size) {
+                      if (idx < 0 || idx >= g2_data_size) {
+                        if (rank == 0)
+                          cerr << "ERROR: G2 index out of bounds: idx=" << idx
+                               << " g2_data_size=" << g2_data_size << endl;
+                      } else {
                         g2_data[idx] = data(bos_offset + iOm, fer_offset + iw, fer_offset + iwp, o1, o2, o3, o4);
                       }
 

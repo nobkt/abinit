@@ -261,20 +261,16 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc, green_imp)
    '   G2_iw_ph data available from TRIQS. Converting to chi_loc (chi = -G2).'
    call wrtout(std_out, msg)
 
-   if (paw_dmft%chi_imp_g2_norb /= norb_corr) then
-     write(msg,'(a,i6,a,i6)') &
-     ' WARNING: G2 norb (', paw_dmft%chi_imp_g2_norb, &
-     ') differs from norb_corr (', norb_corr, '). chi_loc remains zero.'
-     call wrtout(std_out, msg)
-   else if (paw_dmft%chi_imp_g2_nboson /= nboson) then
-     write(msg,'(a,i6,a,i6)') &
-     ' WARNING: G2 nboson (', paw_dmft%chi_imp_g2_nboson, &
-     ') differs from nboson (', nboson, '). chi_loc remains zero.'
-     call wrtout(std_out, msg)
-   else if (paw_dmft%chi_imp_g2_niw /= niw_vertex) then
-     write(msg,'(a,i6,a,i6)') &
-     ' WARNING: G2 niw (', paw_dmft%chi_imp_g2_niw, &
-     ') differs from niw_vertex (', niw_vertex, '). chi_loc remains zero.'
+   ! Validate all dimensions at once
+   if (paw_dmft%chi_imp_g2_norb /= norb_corr .or. &
+     & paw_dmft%chi_imp_g2_nboson /= nboson .or. &
+     & paw_dmft%chi_imp_g2_niw /= niw_vertex) then
+     write(msg,'(3a,3(a,i6,a,i6,a))') &
+     ' WARNING: G2 dimension mismatch. chi_loc remains zero.',ch10, &
+     '   G2 vs expected:', &
+     ' norb=', paw_dmft%chi_imp_g2_norb, '/', norb_corr, ',', &
+     ' nboson=', paw_dmft%chi_imp_g2_nboson, '/', nboson, ',', &
+     ' niw=', paw_dmft%chi_imp_g2_niw, '/', niw_vertex, '.'
      call wrtout(std_out, msg)
    else
      call fill_chi_loc_from_g2(chi_loc, paw_dmft%chi_imp_g2_data, &

@@ -477,9 +477,14 @@ subroutine fill_chi_loc_from_g2(chi, g2_data, norb, niw, nboson)
  ! Loop over all indices and convert G2 to chi
  ! chi_{alpha,beta,gamma,delta}(iw,iw';iOm) = -G2_{alpha,beta,gamma,delta}(iw,iw';iOm)
  !
- ! G2 index (0-based): ((((iOm*niw + iw)*niw + iwp)*norb + alpha)*norb + beta)*norb^2 + gamma*norb + delta
- ! chi index (1-based): I = (iw-1)*norb^2 + (alpha-1)*norb + beta
- !                       J = (iwp-1)*norb^2 + (gamma-1)*norb + delta
+ ! IMPORTANT: The G2 flat index layout below must match the C++ extraction
+ ! in triqs_cthyb_qmc.cpp (ctqmc_triqs_run, G2 extraction section).
+ ! Both use the same packing:
+ !   G2 index (0-based): ((((iOm*niw + iw)*niw + iwp)*norb + alpha)*norb + beta)*norb^2 + gamma*norb + delta
+ ! Any change to the layout must be synchronized in both files.
+ !
+ ! chi composite index (1-based): I = (iw-1)*norb^2 + (alpha-1)*norb + beta
+ !                                J = (iwp-1)*norb^2 + (gamma-1)*norb + delta
 
  do iom = 1, nboson
    do iw = 1, niw

@@ -1536,3 +1536,149 @@ Phase 25 時点と同一。MPI 並列化は出力ファイルに影響しない�
 | `DMFT_optic_kernel.dat` | バブル光学伝導度 | Π_μν テンソルのスピンチャネル分解（SC/S⁺S⁻/S⁻S⁺） |
 | `DMFT_attrib_optic_orbital.dat` | 光学伝導度（軌道分解） | カバー率、軌道ペア分解、ランキング、周波数依存性 |
 | `DMFT_chi_imp_measured.dat` | 測定 χ^imp | TRIQS G2_iw_ph から変換された不純物二粒子相関関数 |
+
+---
+
+## Phase 27: 頂点補正付き光学伝導度と吸収スペクトル帰属（完了）
+
+### 25. dressed current vertex と頂点補正付き光学伝導度（Phase 27: 完了）
+
+**目的:** 既約頂点 Γ^imp を用いて dressed current vertex を計算し、光学伝導度 Π_μν に頂点補正を加え、バブル vs 頂点寄与の帰属分解を実現する。
+
+**背景:**
+
+Phase 26 までの実装では、光学伝導度はバブル近似（Π^bubble のみ）に留まっていた。設計書 Section 5.14 の定式化に従い、局所既約頂点 Γ^imp を用いた dressed current vertex の計算と、それによる頂点補正 Π^vertex の計算が残されていた。バブル近似は独立粒子近似に相当し、多体効果（頂点補正）を含めることで、吸収スペクトルへの電子相関の影響を定量化できるようになる。
+
+具体的には:
+- 頂点補正がゼロの場合: BSE の結果はバブル近似と等価
+- 頂点補正が非ゼロの場合: 電子-正孔相互作用によるスペクトルの再分配が反映される
+- 頂点補正のスピンチャネル分解により、スピン反転遷移に対する多体効果の影響を個別に定量化できる
+
+**定式化:**
+
+設計書 Section 5.14 に基づき、dressed current vertex は以下の BSE で決定される:
+
+```
+j̃_ν(iΩ_m) = [1 - Γ^imp(iΩ_m) · χ̄⁰(iΩ_m)]^{-1} · j̄_ν
+```
+
+ここで:
+- `j̄_ν^{αβ}` は k 平均された裸電流頂点を相関軌道空間に投影したもの
+- `Γ^imp(iΩ_m)` は Stage 3 で抽出された既約頂点（ndim_comp × ndim_comp 行列）
+- `χ̄⁰(iΩ_m)` は格子バブル（Stage 4 の chi0_latt、ndim_comp × ndim_comp 行列）
+- 複合添字 `I = (iw-1)×norb²+(α-1)×norb+β`、ndim_comp = norb_corr² × niw_vertex
+
+頂点補正は:
+```
+Λ_ν^{(γ,δ,n)}(iΩ_m) = j̃_ν^I(iΩ_m) - j̄_ν^I
+```
+
+ここで I = (γ,δ,n) の複合添字を用いる。j̄_ν は n に依存しないが、j̃_ν は Γ と χ̄⁰ の混合により n 依存性を獲得する。
+
+頂点補正付き光学伝導度は:
+```
+Π^vertex_μν(iΩ) = -(1/(β·N_k)) Σ_k Σ_n Σ_{γ,δ} Λ_ν^{γδ,n}(iΩ) × [P·G(iω+iΩ)·j_μ·G(iω)·P†]_{δ,γ}
+```
+
+この行列チェーン `E_μ = P·G_+·j_μ·G·P†` は norb_corr×norb_corr の小行列であり、完全 KS 基底でのバブル計算（mbandc⁴）よりも効率的に計算できる。
+
+**実装した内容:**
+
+1. **`dressed_vertex_type` データ構造の追加** (`m_dmft_optic_kernel.F90`):
+   - `jbar_corr(ndir, norb_corr, norb_corr)` — k 平均裸電流頂点（相関空間）
+   - `lambda_corr(ndir, nboson, norb_corr, norb_corr, niw_vertex)` — 頂点補正（相関空間）
+   - `has_vertex` — 頂点補正が非自明かどうかのフラグ
+   - `ndim_comp = norb_corr² × niw_vertex` — BSE 行列の次元
+
+2. **`init_dressed_vertex` / `destroy_dressed_vertex`** — 初期化・解放ルーチン
+
+3. **`compute_dressed_current_vertex` サブルーチン**:
+
+   a. k 平均裸電流頂点の計算: `j̄_ν^{αβ} = Σ_k w_k J_ν^{αβ}(k)` を MPI 分散計算後に削減。
+
+   b. Γ^imp の非ゼロチェック: ゼロの場合は頂点補正計算をスキップ。
+
+   c. dressed vertex 方程式の求解: `M = I - Γ·χ̄⁰` の逆行列を LAPACK xginv で計算、`j̃ = M⁻¹·j̄`、`Λ = j̃ - j̄`。
+
+4. **`compute_vertex_conductivity` サブルーチン**:
+
+   各 (k, iω_n, iΩ_m) について行列チェーン E_μ = P·G_+·j_μ·G·P† を計算し、
+   `Π^vertex(iΩ, μ, ν) += -(w_k/β) Σ_{γ,δ} Λ_ν^{γδ,n}(iΩ) · E_μ(δ,γ)` で頂点補正を累積。
+   MPI k 点分散 + xmpi_sum。pi_total = pi_bubble + pi_vertex。
+
+5. **`write_optic_vertex_attrib` サブルーチン**:
+   - Section 1: バブル vs 頂点分解（全周波数・全テンソル成分）
+   - Section 2: 頂点増強比（iΩ=0 対角成分）
+   - Section 3: 頂点補正のスピンチャネル分解
+
+6. **ドライバ統合（Stage 5b）** (`m_dmft_absorption_driver.F90`): Stage 5a の後に追加。
+
+**psinablapsi_dmft の MPI 状態の確認:**
+
+検証の結果、vtorho 内の各プロセスが自身の k 点のみ計算し、後続の全ルーチンが distrib%procb でスキップ + xmpi_sum する設計と整合。追加の allreduce は不要。
+
+**変更ファイル:**
+- `src/68_dmft/m_dmft_optic_kernel.F90` — dressed_vertex_type 追加、関連サブルーチン追加
+- `src/68_dmft/m_dmft_absorption_driver.F90` — Stage 5b 追加
+
+---
+
+### 正直な到達点の評価（Phase 27 時点）
+
+**Matsubara 軸応答（dmft_resp_mode=1）の全パイプラインが完成:**
+
+1. 不純物バブル χ₀^imp → 2. 測定 χ^imp → 3. 既約頂点 Γ^imp → 4. 格子バブル χ₀^latt →
+5. 格子 BSE χ_full → 6. バブル光学伝導度 Π^bubble → 7. dressed vertex → 8. 頂点補正 Π^vertex →
+9. 全レベル帰属（スピンチャネル・軌道ペア・k点・頂点/バブル分解）
+
+**残る制約:**
+1. TRIQS G2 API の実テスト未完了（TRIQS 環境が必要）
+2. 実周波数応答バックエンド未実装（α(ω) 直接出力は不可能）
+3. Matsubara 軸帰属は静的量・分率として物理的に有意だが、ピーク位置の同定には実周波数データが不可欠
+
+---
+
+## 次ステップで実装すべきこと
+
+### 次ステップ 0: TRIQS G2 インターフェースの実テスト（最優先）
+
+Phase 25 の G2 測定インターフェースと Phase 27 の dressed vertex を TRIQS 環境で検証する。
+
+**検証項目:**
+1. G2_iw_ph アクセス・データレイアウト・符号規約の正確性
+2. dressed vertex が Γ≠0 で Π^vertex ≠ 0 を生じること
+3. 頂点増強比の物理的妥当性
+
+### 次ステップ 1: 実周波数応答バックエンド（最難関）
+
+`m_dmft_realaxis_response.F90` の実装。方針 A（実軸不純物ソルバー）が推奨。
+
+**具体的なステップ:**
+1. 実軸自己エネルギー入力インターフェース
+2. 実軸格子 Green 関数 G(k,ω)
+3. 実軸バブル Π^bubble(ω) = ∫ dε f(ε) Tr[j A(ε) j A(ε+ω)]
+4. 実軸 dressed vertex
+5. σ(ω), ε(ω), α(ω) 出力
+
+---
+
+## 帰属出力ファイル一覧（Phase 27 時点）
+
+| ファイル名 | レベル | 内容 |
+| --- | --- | --- |
+| `DMFT_attrib_chi0_imp_atom{N}.dat` | 不純物（原子別） | 原子 N の chi0_imp のスピン/軌道帰属 |
+| `DMFT_attrib_chi0_imp_total.dat` | 不純物（合算） | 全原子合算の chi0_imp のスピン/軌道帰属 |
+| `DMFT_attrib_summary_imp.dat` | 不純物サマリー | 静的感受率・チャネル分率・収束診断・軌道ランキング |
+| `DMFT_attrib_freqprofile_imp.dat` | 不純物プロファイル | 周波数依存帰属プロファイル |
+| `DMFT_attrib_chi0_lattice.dat` | 格子バブル | 格子バブル chi0_latt のスピン/軌道帰属 |
+| `DMFT_attrib_chi0_kpoint.dat` | 格子バブル（k分解） | k 点分解スピンチャネル + 軌道ペア分解 |
+| `DMFT_attrib_summary_latt.dat` | 格子サマリー | 格子レベルの静的感受率・軌道ランキング |
+| `DMFT_attrib_freqprofile_latt.dat` | 格子プロファイル | 周波数依存帰属プロファイル |
+| `DMFT_attrib_chi_full.dat` | BSE 全感受率 | BSE 補正後 chi_full のスピン/軌道帰属 |
+| `DMFT_attrib_summary_bse.dat` | BSE サマリー | BSE レベルの静的感受率・軌道ランキング |
+| `DMFT_attrib_freqprofile_bse.dat` | BSE プロファイル | 周波数依存帰属プロファイル |
+| `DMFT_attrib_comparison.dat` | レベル間比較 | 不純物/格子/BSE の3段階比較 |
+| `DMFT_optic_kernel.dat` | 光学伝導度（全体） | Π_μν（バブル + 頂点補正、スピンチャネル分解） |
+| `DMFT_attrib_optic_orbital.dat` | 光学伝導度（軌道分解） | 軌道ペア分解、ランキング |
+| `DMFT_optic_vertex_attrib.dat` | 光学伝導度（頂点帰属）[NEW] | バブル/頂点分解、増強比、スピンチャネル分解 |
+| `DMFT_chi_imp_measured.dat` | 測定 χ^imp | TRIQS G2_iw_ph から変換された二粒子相関関数 |

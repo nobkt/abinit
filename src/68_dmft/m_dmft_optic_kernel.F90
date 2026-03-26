@@ -1403,6 +1403,7 @@ subroutine compute_dressed_current_vertex(dvert, paw_dmft, sproj, &
  integer :: ikpt, isppol, nu, ierr
  integer :: ialpha, ibeta, iom, iw
  integer :: mbandc, nkpt, norb_sq, ndim_comp, idx_i
+ integer :: n_inv_fail
  real(dp) :: wk, gamma_norm
  complex(dp), allocatable :: proj_k(:,:), jnu_ks(:,:), temp_proj(:,:), jnu_loc(:,:)
  complex(dp), allocatable :: bse_mat(:,:), jbar_vec(:), jtilde_vec(:)
@@ -1423,7 +1424,7 @@ subroutine compute_dressed_current_vertex(dvert, paw_dmft, sproj, &
  mbandc = paw_dmft%mbandc
  nkpt = paw_dmft%nkpt
  norb_sq = norb_corr * norb_corr
- ndim_comp = norb_sq * niw_vertex
+ ndim_comp = dvert%ndim_comp
 
  ! ===================================================================
  ! Step 1: Compute k-averaged bare current vertex in correlated subspace
@@ -1511,6 +1512,7 @@ subroutine compute_dressed_current_vertex(dvert, paw_dmft, sproj, &
 
  dvert%lambda_corr = czero
  dvert%has_vertex = .true.
+ n_inv_fail = 0
 
  do nu = 1, dvert%ndir
 
@@ -1543,14 +1545,15 @@ subroutine compute_dressed_current_vertex(dvert, paw_dmft, sproj, &
      ! Solve: j_tilde = M^{-1} * jbar
      ! Method: invert M, then multiply
      call xginv(bse_mat, ndim_comp, ierr)
-     if (ierr /= 0) then
-       write(msg,'(a,i4,a,i2,a)') &
-       ' compute_dressed_current_vertex: BSE matrix inversion failed at iOm=', iom, &
-       ' nu=', nu, '. Vertex correction set to zero for this frequency.'
-       ABI_WARNING(msg)
-       ! lambda remains zero for this (nu, iom)
-       cycle
-     end if
+      if (ierr /= 0) then
+        n_inv_fail = n_inv_fail + 1
+        write(msg,'(a,i4,a,i2,a)') &
+        ' compute_dressed_current_vertex: BSE matrix inversion failed at iOm=', iom, &
+        ' nu=', nu, '. Vertex correction set to zero for this frequency.'
+        ABI_WARNING(msg)
+        ! lambda remains zero for this (nu, iom)
+        cycle
+      end if
 
      ! j_tilde = M^{-1} * jbar
      jtilde_vec = czero
@@ -1573,6 +1576,14 @@ subroutine compute_dressed_current_vertex(dvert, paw_dmft, sproj, &
  ABI_FREE(bse_mat)
  ABI_FREE(jbar_vec)
  ABI_FREE(jtilde_vec)
+
+ ! Report inversion failure summary
+ if (n_inv_fail > 0) then
+   write(msg,'(a,i6,a,i6,a)') &
+   ' compute_dressed_current_vertex: WARNING: ', n_inv_fail, ' of ', &
+   dvert%ndir * nboson, ' BSE matrix inversions failed. Check QMC statistics or frequency truncation.'
+   call wrtout(std_out, msg)
+ end if
 
  write(msg,'(a)') ' compute_dressed_current_vertex: Dressed current vertex computation complete.'
  call wrtout(std_out, msg)

@@ -42,7 +42,10 @@ MODULE m_dmft_optic_kernel
  use m_paw_dmft, only : paw_dmft_type
  use m_green, only : green_type
  use m_xmpi, only : xmpi_sum
+ use m_hide_lapack, only : xginv
  use m_dmft_spinor_proj, only : spinor_proj_type
+ use m_dmft_vertex, only : vertex_irr_type
+ use m_dmft_lattice_bse, only : lattice_bse_type
 
  implicit none
 
@@ -58,6 +61,12 @@ MODULE m_dmft_optic_kernel
  public :: destroy_optic_orbital_attrib
  public :: compute_optic_orbital_attrib
  public :: write_optic_orbital_attrib
+ public :: dressed_vertex_type
+ public :: init_dressed_vertex
+ public :: destroy_dressed_vertex
+ public :: compute_dressed_current_vertex
+ public :: compute_vertex_conductivity
+ public :: write_optic_vertex_attrib
 
 !!***
 
@@ -154,6 +163,52 @@ MODULE m_dmft_optic_kernel
    ! Spin-conserving part of projected bubble
 
  end type optic_orbital_attrib_type
+
+!!***
+
+!!****t* m_dmft_optic_kernel/dressed_vertex_type
+!! NAME
+!!  dressed_vertex_type
+!!
+!! FUNCTION
+!!  Stores the dressed current vertex and vertex correction for
+!!  vertex-corrected optical conductivity.
+!!
+!!  The dressed current vertex satisfies the BSE:
+!!    j_tilde_nu(iOm) = [1 - Gamma_imp(iOm) * chi0_latt(iOm)]^{-1} * jbar_nu
+!!
+!!  where jbar_nu is the k-averaged bare current vertex projected to
+!!  the correlated orbital subspace.
+!!
+!!  The vertex correction is:
+!!    lambda_nu(iOm) = j_tilde_nu(iOm) - jbar_nu
+!!
+!!  lambda_corr is stored as (gamma,delta,iw) where gamma,delta are
+!!  correlated spinor-orbital indices and iw is fermionic frequency.
+!!  The fermionic dependence arises from the BSE mixing of frequency indices.
+!!
+!! SOURCE
+
+ type, public :: dressed_vertex_type
+
+   integer :: ndir = 0
+   integer :: nboson = 0
+   integer :: norb_corr = 0
+   integer :: niw_vertex = 0
+   integer :: ndim_comp = 0
+
+   complex(dp), allocatable :: jbar_corr(:,:,:)
+   ! jbar_corr(ndir, norb_corr, norb_corr) :
+   ! k-averaged bare current vertex projected to correlated subspace
+
+   complex(dp), allocatable :: lambda_corr(:,:,:,:,:)
+   ! lambda_corr(ndir, nboson, norb_corr, norb_corr, niw_vertex) :
+   ! vertex correction in correlated subspace
+
+   logical :: has_vertex = .false.
+   ! True if vertex corrections are non-trivial (Gamma_imp was non-zero)
+
+ end type dressed_vertex_type
 
 !!***
 
@@ -1225,6 +1280,701 @@ subroutine write_optic_orbital_attrib(orb_attrib, pi_bubble_total, fname, beta)
  call wrtout(std_out, msg)
 
 end subroutine write_optic_orbital_attrib
+
+!!***
+
+!!****f* m_dmft_optic_kernel/init_dressed_vertex
+!! NAME
+!!  init_dressed_vertex
+!!
+!! FUNCTION
+!!  Initialize the dressed vertex structure.
+!!
+!! SOURCE
+
+subroutine init_dressed_vertex(dvert, ndir, nboson, norb_corr, niw_vertex)
+
+ type(dressed_vertex_type), intent(inout) :: dvert
+ integer, intent(in) :: ndir, nboson, norb_corr, niw_vertex
+
+!Local variables
+ character(len=500) :: msg
+
+! *********************************************************************
+
+ dvert%ndir = ndir
+ dvert%nboson = nboson
+ dvert%norb_corr = norb_corr
+ dvert%niw_vertex = niw_vertex
+ dvert%ndim_comp = norb_corr * norb_corr * niw_vertex
+ dvert%has_vertex = .false.
+
+ write(msg,'(a,4(a,i6))') &
+ ' init_dressed_vertex:', &
+ ' ndir=', ndir, ' nboson=', nboson, &
+ ' norb_corr=', norb_corr, ' niw_vertex=', niw_vertex
+ call wrtout(std_out, msg)
+
+ ABI_MALLOC(dvert%jbar_corr, (ndir, norb_corr, norb_corr))
+ ABI_MALLOC(dvert%lambda_corr, (ndir, nboson, norb_corr, norb_corr, niw_vertex))
+
+ dvert%jbar_corr = czero
+ dvert%lambda_corr = czero
+
+end subroutine init_dressed_vertex
+
+!!***
+
+!!****f* m_dmft_optic_kernel/destroy_dressed_vertex
+!! NAME
+!!  destroy_dressed_vertex
+!!
+!! FUNCTION
+!!  Deallocate the dressed vertex structure.
+!!
+!! SOURCE
+
+subroutine destroy_dressed_vertex(dvert)
+
+ type(dressed_vertex_type), intent(inout) :: dvert
+
+! *********************************************************************
+
+ ABI_SFREE(dvert%jbar_corr)
+ ABI_SFREE(dvert%lambda_corr)
+
+ dvert%ndir = 0
+ dvert%nboson = 0
+ dvert%norb_corr = 0
+ dvert%niw_vertex = 0
+ dvert%ndim_comp = 0
+ dvert%has_vertex = .false.
+
+end subroutine destroy_dressed_vertex
+
+!!***
+
+!!****f* m_dmft_optic_kernel/compute_dressed_current_vertex
+!! NAME
+!!  compute_dressed_current_vertex
+!!
+!! FUNCTION
+!!  Compute the dressed current vertex by solving the BSE for the current vertex:
+!!
+!!    j_tilde_nu(iOm) = [1 - Gamma_imp(iOm) * chi0_latt(iOm)]^{-1} * jbar_nu
+!!
+!!  Step 1: Compute k-averaged bare current vertex in correlated subspace
+!!    jbar_nu^{alpha,beta} = (1/Nk) sum_k wk * P(alpha,a;k) j_nu^{ab}(k) P*(beta,b;k)
+!!
+!!  Step 2: Extend jbar to composite index space: jbar_I = jbar^{alpha,beta} for all n
+!!
+!!  Step 3: Solve dressed vertex equation via matrix inversion
+!!    M(iOm) = I - Gamma(iOm) * chi0_latt(iOm)
+!!    j_tilde(iOm) = M^{-1}(iOm) * jbar
+!!
+!!  Step 4: Extract vertex correction
+!!    lambda(iOm) = j_tilde(iOm) - jbar
+!!
+!! INPUTS
+!!  paw_dmft = DFT+DMFT data with psinablapsi_dmft and system parameters
+!!  green_imp = converged Green function (not used, but for consistency)
+!!  sproj = spinor projectors (chipsi), must be populated
+!!  vertex_irr = irreducible vertex Gamma_imp from extract_vertex_irr
+!!  lbse = lattice BSE data with chi0_latt
+!!  nboson, niw_vertex, nspinor, norb_corr = frequency and dimension parameters
+!!
+!! SIDE EFFECTS
+!!  dvert = on output, contains dressed vertex and vertex correction
+!!
+!! SOURCE
+
+subroutine compute_dressed_current_vertex(dvert, paw_dmft, sproj, &
+  & vertex_irr, lbse, nboson, niw_vertex, nspinor, norb_corr)
+
+ type(dressed_vertex_type), intent(inout) :: dvert
+ type(paw_dmft_type), intent(in) :: paw_dmft
+ type(spinor_proj_type), intent(in) :: sproj
+ type(vertex_irr_type), intent(in) :: vertex_irr
+ type(lattice_bse_type), intent(in) :: lbse
+ integer, intent(in) :: nboson, niw_vertex, nspinor, norb_corr
+
+!Local variables
+ character(len=500) :: msg
+ integer :: ikpt, isppol, nu, ierr
+ integer :: ialpha, ibeta, iom, iw
+ integer :: mbandc, nkpt, norb_sq, ndim_comp, idx_i
+ real(dp) :: wk, gamma_norm
+ complex(dp), allocatable :: proj_k(:,:), jnu_ks(:,:), temp_proj(:,:), jnu_loc(:,:)
+ complex(dp), allocatable :: bse_mat(:,:), jbar_vec(:), jtilde_vec(:)
+
+! *********************************************************************
+
+ write(msg,'(a)') ' compute_dressed_current_vertex: Computing dressed current vertex'
+ call wrtout(std_out, msg)
+
+ ! Check prerequisites
+ if (paw_dmft%has_psinablapsi_dmft /= 1) then
+   write(msg,'(a)') &
+   ' compute_dressed_current_vertex: psinablapsi_dmft not computed. Vertex correction remains zero.'
+   call wrtout(std_out, msg)
+   return
+ end if
+
+ mbandc = paw_dmft%mbandc
+ nkpt = paw_dmft%nkpt
+ norb_sq = norb_corr * norb_corr
+ ndim_comp = norb_sq * niw_vertex
+
+ ! ===================================================================
+ ! Step 1: Compute k-averaged bare current vertex in correlated subspace
+ ! jbar_nu^{alpha,beta} = sum_k wk * J_nu^{alpha,beta}(k)
+ ! where J_nu(k) = P(k) * j_nu(k) * P(k)^dag
+ ! ===================================================================
+
+ ABI_MALLOC(proj_k, (norb_corr, mbandc))
+ ABI_MALLOC(jnu_ks, (mbandc, mbandc))
+ ABI_MALLOC(temp_proj, (norb_corr, mbandc))
+ ABI_MALLOC(jnu_loc, (norb_corr, norb_corr))
+
+ dvert%jbar_corr = czero
+
+ do isppol = 1, paw_dmft%nsppol
+   do ikpt = 1, nkpt
+     ! MPI k-point distribution: skip non-owned k-points
+     if (paw_dmft%distrib%procb(ikpt) /= paw_dmft%distrib%me_kpt) cycle
+     wk = paw_dmft%wtk(ikpt)
+
+     ! Extract projector for this k-point
+     proj_k(:,:) = sproj%proj(:,:,ikpt)
+
+     do nu = 1, dvert%ndir
+       ! Build j_nu in complex form
+       do ialpha = 1, mbandc
+         do ibeta = 1, mbandc
+           jnu_ks(ialpha, ibeta) = &
+             cmplx(paw_dmft%psinablapsi_dmft(1, nu, ialpha, ibeta, ikpt, isppol), &
+                   paw_dmft%psinablapsi_dmft(2, nu, ialpha, ibeta, ikpt, isppol), kind=dp)
+         end do
+       end do
+
+       ! Project: J_nu^loc = P * j_nu * P^dag
+       call zgemm_wrapper(norb_corr, mbandc, mbandc, proj_k, jnu_ks, temp_proj)
+       call zgemm_ct_wrapper(norb_corr, norb_corr, mbandc, temp_proj, proj_k, jnu_loc)
+
+       ! Accumulate k-average
+       dvert%jbar_corr(nu, :, :) = dvert%jbar_corr(nu, :, :) + wk * jnu_loc(:, :)
+     end do
+   end do
+ end do
+
+ ABI_FREE(proj_k)
+ ABI_FREE(jnu_ks)
+ ABI_FREE(temp_proj)
+ ABI_FREE(jnu_loc)
+
+ ! MPI reduction to get full k-average
+ call xmpi_sum(dvert%jbar_corr, paw_dmft%distrib%comm_kpt, ierr)
+
+ write(msg,'(a)') ' compute_dressed_current_vertex: k-averaged bare current vertex computed.'
+ call wrtout(std_out, msg)
+
+ ! ===================================================================
+ ! Check if irreducible vertex is non-zero
+ ! If Gamma is zero (no G2 data), dressed vertex = bare vertex
+ ! ===================================================================
+ gamma_norm = zero
+ do iom = 1, nboson
+   do idx_i = 1, ndim_comp
+     gamma_norm = gamma_norm + abs(vertex_irr%gamma_mat(iom, idx_i, idx_i))
+   end do
+ end do
+
+ if (gamma_norm < tol16) then
+   write(msg,'(a)') &
+   ' compute_dressed_current_vertex: Gamma_imp is zero. Vertex correction is zero (bubble approximation).'
+   call wrtout(std_out, msg)
+   dvert%lambda_corr = czero
+   dvert%has_vertex = .false.
+   return
+ end if
+
+ ! ===================================================================
+ ! Step 2-4: Solve dressed vertex equation for each bosonic frequency
+ ! M(iOm) = I - Gamma(iOm) * chi0_latt(iOm)
+ ! j_tilde(iOm) = M^{-1}(iOm) * jbar
+ ! lambda(iOm) = j_tilde(iOm) - jbar
+ ! ===================================================================
+
+ ABI_MALLOC(bse_mat, (ndim_comp, ndim_comp))
+ ABI_MALLOC(jbar_vec, (ndim_comp))
+ ABI_MALLOC(jtilde_vec, (ndim_comp))
+
+ dvert%lambda_corr = czero
+ dvert%has_vertex = .true.
+
+ do nu = 1, dvert%ndir
+
+   ! Extend jbar to composite index space:
+   ! jbar_vec(I) = jbar^{alpha,beta} for all fermionic frequencies n
+   ! I = (iw - 1) * norb_sq + (ialpha - 1) * norb_corr + ibeta
+   do iw = 1, niw_vertex
+     do ialpha = 1, norb_corr
+       do ibeta = 1, norb_corr
+         idx_i = (iw - 1) * norb_sq + (ialpha - 1) * norb_corr + ibeta
+         jbar_vec(idx_i) = dvert%jbar_corr(nu, ialpha, ibeta)
+       end do
+     end do
+   end do
+
+   do iom = 1, nboson
+
+     ! Construct M = I - Gamma(iOm) * chi0_latt(iOm)
+     ! First compute Gamma * chi0_latt via explicit matrix multiply
+     bse_mat = czero
+     call zgemm_wrapper(ndim_comp, ndim_comp, ndim_comp, &
+       & vertex_irr%gamma_mat(iom,:,:), lbse%chi0_latt(iom,:,:), bse_mat)
+
+     ! M = I - Gamma * chi0
+     bse_mat = -bse_mat
+     do idx_i = 1, ndim_comp
+       bse_mat(idx_i, idx_i) = bse_mat(idx_i, idx_i) + cone
+     end do
+
+     ! Solve: j_tilde = M^{-1} * jbar
+     ! Method: invert M, then multiply
+     call xginv(bse_mat, ndim_comp, ierr)
+     if (ierr /= 0) then
+       write(msg,'(a,i4,a,i2,a)') &
+       ' compute_dressed_current_vertex: BSE matrix inversion failed at iOm=', iom, &
+       ' nu=', nu, '. Vertex correction set to zero for this frequency.'
+       ABI_WARNING(msg)
+       ! lambda remains zero for this (nu, iom)
+       cycle
+     end if
+
+     ! j_tilde = M^{-1} * jbar
+     jtilde_vec = czero
+     call zgemv_wrapper(ndim_comp, bse_mat, jbar_vec, jtilde_vec)
+
+     ! Extract lambda = j_tilde - jbar, reshape to (gamma, delta, iw)
+     do iw = 1, niw_vertex
+       do ialpha = 1, norb_corr
+         do ibeta = 1, norb_corr
+           idx_i = (iw - 1) * norb_sq + (ialpha - 1) * norb_corr + ibeta
+           dvert%lambda_corr(nu, iom, ialpha, ibeta, iw) = &
+             jtilde_vec(idx_i) - jbar_vec(idx_i)
+         end do
+       end do
+     end do
+
+   end do ! iom
+ end do ! nu
+
+ ABI_FREE(bse_mat)
+ ABI_FREE(jbar_vec)
+ ABI_FREE(jtilde_vec)
+
+ write(msg,'(a)') ' compute_dressed_current_vertex: Dressed current vertex computation complete.'
+ call wrtout(std_out, msg)
+
+end subroutine compute_dressed_current_vertex
+
+!!***
+
+!!****f* m_dmft_optic_kernel/compute_vertex_conductivity
+!! NAME
+!!  compute_vertex_conductivity
+!!
+!! FUNCTION
+!!  Compute the vertex correction to the optical conductivity.
+!!
+!!  Pi^vertex_mu_nu(iOm) = -(1/(beta*Nk)) sum_k sum_n
+!!    Tr_corr[ lambda_nu(n;iOm) * E_mu(k,n;iOm) ]
+!!
+!!  where:
+!!    A(k,iw) = G^KS(k,iw) * P(k)^dag          [mbandc x norb_corr]
+!!    C_mu(k,iw) = j_mu(k) * A(k,iw)            [mbandc x norb_corr]
+!!    D_mu(k,iw;iOm) = G^KS(k,iw+iOm) * C_mu   ... wait, need transpose
+!!
+!!  More precisely, the vertex-corrected contribution is:
+!!    Pi^vertex(iOm, mu, nu) = -(1/beta) sum_k wk sum_n
+!!      sum_{gamma,delta} lambda_nu^{gamma,delta}(n;iOm) *
+!!        [P * G+(k) * j_mu(k) * G(k) * P^dag]_{delta,gamma}
+!!
+!!  where G = G(k,iw_n), G+ = G(k,iw_n+iOm).
+!!
+!!  The spin-channel decomposition classifies the (gamma,delta) pair:
+!!    SC: both same spin
+!!    S+S-: gamma=up, delta=down
+!!    S-S+: gamma=down, delta=up
+!!
+!! INPUTS
+!!  paw_dmft = DFT+DMFT data
+!!  green_imp = converged Green function with oper(iw)%ks
+!!  dvert = dressed vertex with lambda_corr
+!!  sproj = spinor projectors
+!!  nboson, niw_vertex, nspinor = parameters
+!!
+!! SIDE EFFECTS
+!!  optic = pi_vertex is filled; pi_total is updated to bubble + vertex
+!!
+!! SOURCE
+
+subroutine compute_vertex_conductivity(optic, paw_dmft, green_imp, dvert, sproj, &
+  & nboson, niw_vertex, nspinor)
+
+ type(optic_kernel_type), intent(inout) :: optic
+ type(paw_dmft_type), intent(in) :: paw_dmft
+ type(green_type), intent(in) :: green_imp
+ type(dressed_vertex_type), intent(in) :: dvert
+ type(spinor_proj_type), intent(in) :: sproj
+ integer, intent(in) :: nboson, niw_vertex, nspinor
+
+!Local variables
+ character(len=500) :: msg
+ integer :: iom, iw, ikpt, isppol, mu, nu, ierr
+ integer :: igamma, idelta, ispin_g, ispin_d
+ integer :: mbandc, nkpt, norb_corr, ndim_orb
+ real(dp) :: beta, wk
+ complex(dp) :: lambda_gd, e_dg, contrib
+ logical :: do_spin_decomp
+ complex(dp), allocatable :: proj_k(:,:)
+ complex(dp), allocatable :: jmu_ks(:,:)
+ complex(dp), allocatable :: g_iw(:,:), g_iw_om(:,:)
+ ! Working arrays for matrix chain: E = P * G+ * j_mu * G * P^dag
+ complex(dp), allocatable :: gp(:,:)       ! G * P^dag  [mbandc x norb_corr]
+ complex(dp), allocatable :: jgp(:,:)      ! j_mu * G * P^dag [mbandc x norb_corr]
+ complex(dp), allocatable :: gpjgp(:,:)    ! G+ * j_mu * G * P^dag [mbandc x norb_corr]
+ complex(dp), allocatable :: e_mat(:,:)    ! P * G+ * j_mu * G * P^dag [norb_corr x norb_corr]
+
+! *********************************************************************
+
+ write(msg,'(a)') ' compute_vertex_conductivity: Computing vertex correction to optical conductivity'
+ call wrtout(std_out, msg)
+
+ if (.not. dvert%has_vertex) then
+   write(msg,'(a)') &
+   ' compute_vertex_conductivity: Dressed vertex has no vertex correction. pi_vertex remains zero.'
+   call wrtout(std_out, msg)
+   optic%pi_total = optic%pi_bubble
+   return
+ end if
+
+ ! Check prerequisites
+ if (paw_dmft%has_psinablapsi_dmft /= 1) then
+   write(msg,'(a)') &
+   ' compute_vertex_conductivity: psinablapsi_dmft not computed. pi_vertex remains zero.'
+   call wrtout(std_out, msg)
+   optic%pi_total = optic%pi_bubble
+   return
+ end if
+
+ if (green_imp%oper(1)%has_operks /= 1) then
+   write(msg,'(a)') &
+   ' compute_vertex_conductivity: Green function has no KS-basis data. pi_vertex remains zero.'
+   call wrtout(std_out, msg)
+   optic%pi_total = optic%pi_bubble
+   return
+ end if
+
+ mbandc = paw_dmft%mbandc
+ nkpt = paw_dmft%nkpt
+ norb_corr = dvert%norb_corr
+ ndim_orb = norb_corr / nspinor
+ beta = one / paw_dmft%temp
+ do_spin_decomp = (nspinor == 2)
+
+ ! Validate frequency bounds
+ if (niw_vertex + nboson - 1 > green_imp%nw) then
+   write(msg,'(a,i6,a,i6,a,i6)') &
+   ' compute_vertex_conductivity: frequency bounds exceeded. niw_vertex=', niw_vertex, &
+   ' nboson=', nboson, ' but green has nw=', green_imp%nw
+   ABI_ERROR(msg)
+ end if
+
+ optic%pi_vertex = czero
+
+ ! Allocate working arrays
+ ABI_MALLOC(proj_k, (norb_corr, mbandc))
+ ABI_MALLOC(jmu_ks, (mbandc, mbandc))
+ ABI_MALLOC(g_iw, (mbandc, mbandc))
+ ABI_MALLOC(g_iw_om, (mbandc, mbandc))
+ ABI_MALLOC(gp, (mbandc, norb_corr))
+ ABI_MALLOC(jgp, (mbandc, norb_corr))
+ ABI_MALLOC(gpjgp, (mbandc, norb_corr))
+ ABI_MALLOC(e_mat, (norb_corr, norb_corr))
+
+ ! Main computation loop
+ ! Pi^vertex(iOm, mu, nu) = -(1/beta) sum_k wk sum_n
+ !   sum_{gamma,delta} lambda_nu^{gd}(n;iOm) * E_mu^{dg}(k,n;iOm)
+ ! where E_mu = P * G(iw+iOm) * j_mu * G(iw) * P^dag
+
+ do isppol = 1, paw_dmft%nsppol
+   do ikpt = 1, nkpt
+     ! MPI k-point distribution
+     if (paw_dmft%distrib%procb(ikpt) /= paw_dmft%distrib%me_kpt) cycle
+     wk = paw_dmft%wtk(ikpt)
+
+     ! Extract projector
+     proj_k(:,:) = sproj%proj(:,:,ikpt)
+
+     do iom = 1, nboson
+       do iw = 1, niw_vertex
+         if (iw + iom - 1 > green_imp%nw) cycle
+
+         ! Extract G(k, iw) and G(k, iw+iOm)
+         g_iw(:,:) = green_imp%oper(iw)%ks(:,:,ikpt,isppol)
+         g_iw_om(:,:) = green_imp%oper(iw+iom-1)%ks(:,:,ikpt,isppol)
+
+         ! Compute gp = G(iw) * P^dag  [mbandc x norb_corr]
+         ! gp(b, gamma) = sum_c G(b,c) * P*(gamma, c) = [G * P^dag]_{b,gamma}
+         call zgemm_ct_wrapper(mbandc, norb_corr, mbandc, g_iw, proj_k, gp)
+
+         do mu = 1, 3
+           ! Build j_mu matrix
+           do igamma = 1, mbandc
+             do idelta = 1, mbandc
+               jmu_ks(igamma, idelta) = &
+                 cmplx(paw_dmft%psinablapsi_dmft(1, mu, igamma, idelta, ikpt, isppol), &
+                       paw_dmft%psinablapsi_dmft(2, mu, igamma, idelta, ikpt, isppol), kind=dp)
+             end do
+           end do
+
+           ! jgp = j_mu * gp  [mbandc x norb_corr]
+           call zgemm_wrapper(mbandc, norb_corr, mbandc, jmu_ks, gp, jgp)
+
+           ! gpjgp = G(iw+iOm) * jgp  [mbandc x norb_corr]
+           call zgemm_wrapper(mbandc, norb_corr, mbandc, g_iw_om, jgp, gpjgp)
+
+           ! E_mu = P * gpjgp = P * G+ * j_mu * G * P^dag  [norb_corr x norb_corr]
+           call zgemm_wrapper(norb_corr, norb_corr, mbandc, proj_k, gpjgp, e_mat)
+
+           ! Now compute: Pi^vertex(iOm, mu, nu) += -(wk/beta) *
+           !   sum_{gamma,delta} lambda_nu^{gd}(iw;iOm) * E_mu^{dg}
+           do nu = 1, 3
+             do igamma = 1, norb_corr
+               do idelta = 1, norb_corr
+                 lambda_gd = dvert%lambda_corr(nu, iom, igamma, idelta, iw)
+                 if (abs(lambda_gd) < tol16) cycle
+
+                 e_dg = e_mat(idelta, igamma)
+                 contrib = -wk / beta * lambda_gd * e_dg
+
+                 optic%pi_vertex(iom, mu, nu) = optic%pi_vertex(iom, mu, nu) + contrib
+               end do
+             end do
+           end do ! nu
+
+         end do ! mu
+       end do ! iw
+     end do ! iom
+   end do ! ikpt
+ end do ! isppol
+
+ ! MPI reduction
+ call xmpi_sum(optic%pi_vertex, paw_dmft%distrib%comm_kpt, ierr)
+
+ ! Update total: pi_total = pi_bubble + pi_vertex
+ optic%pi_total = optic%pi_bubble + optic%pi_vertex
+
+ ABI_FREE(proj_k)
+ ABI_FREE(jmu_ks)
+ ABI_FREE(g_iw)
+ ABI_FREE(g_iw_om)
+ ABI_FREE(gp)
+ ABI_FREE(jgp)
+ ABI_FREE(gpjgp)
+ ABI_FREE(e_mat)
+
+ write(msg,'(a)') ' compute_vertex_conductivity: Vertex-corrected optical conductivity complete.'
+ call wrtout(std_out, msg)
+
+end subroutine compute_vertex_conductivity
+
+!!***
+
+!!****f* m_dmft_optic_kernel/write_optic_vertex_attrib
+!! NAME
+!!  write_optic_vertex_attrib
+!!
+!! FUNCTION
+!!  Write vertex attribution of optical conductivity to file.
+!!
+!!  Sections:
+!!    1: Vertex vs bubble decomposition for each (mu,nu) and bosonic frequency
+!!    2: Vertex enhancement ratio at iOm=0 (diagonal components)
+!!    3: Spin-channel decomposition of vertex correction (if nspinor=2)
+!!
+!! SOURCE
+
+subroutine write_optic_vertex_attrib(optic, dvert, fname, beta, nspinor)
+
+ type(optic_kernel_type), intent(in) :: optic
+ type(dressed_vertex_type), intent(in) :: dvert
+ character(len=*), intent(in) :: fname
+ real(dp), intent(in) :: beta
+ integer, intent(in) :: nspinor
+
+!Local variables
+ integer :: unt, iom, mu, nu, ios, ndim_orb
+ integer :: igamma, idelta, ispin_g, ispin_d, iw
+ real(dp) :: omega_boson, pi_bub_abs, pi_vtx_abs, pi_tot_abs, enhance
+ complex(dp) :: vtx_sc, vtx_pm, vtx_mp, vtx_total
+ character(len=500) :: msg
+
+! *********************************************************************
+
+ ndim_orb = dvert%norb_corr / nspinor
+
+ open(newunit=unt, file=fname, form='formatted', action='write', iostat=ios)
+ if (ios /= 0) then
+   write(msg,'(3a)') 'Cannot open file: ', trim(fname), ' for writing.'
+   ABI_ERROR(msg)
+ end if
+
+ write(unt,'(a)') '# DFT+DMFT Optical conductivity: vertex correction attribution'
+ write(unt,'(a,i6)') '# nboson = ', optic%nboson
+ write(unt,'(a,es14.6)') '# beta = ', beta
+ write(unt,'(a,l2)') '# has_vertex = ', dvert%has_vertex
+ write(unt,'(a)') '#'
+
+ ! Section 1: Vertex vs bubble decomposition
+ write(unt,'(a)') '# Section 1: Vertex vs bubble decomposition'
+ write(unt,'(a)') '# iOm  Omega  mu  nu  |Pi_bubble|  |Pi_vertex|  |Pi_total|  vtx/bub_ratio'
+
+ do iom = 1, optic%nboson
+   omega_boson = two_pi * dble(iom - 1) / beta
+   do mu = 1, optic%ndir
+     do nu = 1, optic%ndir
+       pi_bub_abs = abs(optic%pi_bubble(iom,mu,nu))
+       pi_vtx_abs = abs(optic%pi_vertex(iom,mu,nu))
+       pi_tot_abs = abs(optic%pi_total(iom,mu,nu))
+       if (pi_bub_abs > tol16) then
+         enhance = pi_vtx_abs / pi_bub_abs
+       else
+         enhance = zero
+       end if
+       write(unt,'(i6,es14.6,2i3,3es18.8,es14.4)') iom, omega_boson, mu, nu, &
+         pi_bub_abs, pi_vtx_abs, pi_tot_abs, enhance
+     end do
+   end do
+ end do
+
+ ! Section 2: Vertex enhancement at iOm=0 (diagonal)
+ write(unt,'(a)') '#'
+ write(unt,'(a)') '# Section 2: Vertex enhancement at iOm=0 (diagonal mu=nu)'
+ write(unt,'(a)') '# mu  |Pi_bub|  |Pi_vtx|  |Pi_tot|  enhancement(tot/bub)'
+
+ do mu = 1, optic%ndir
+   pi_bub_abs = abs(optic%pi_bubble(1,mu,mu))
+   pi_vtx_abs = abs(optic%pi_vertex(1,mu,mu))
+   pi_tot_abs = abs(optic%pi_total(1,mu,mu))
+   if (pi_bub_abs > tol16) then
+     enhance = pi_tot_abs / pi_bub_abs
+   else
+     enhance = zero
+   end if
+   write(unt,'(i3,3es18.8,f12.4)') mu, pi_bub_abs, pi_vtx_abs, pi_tot_abs, enhance
+ end do
+
+ ! Section 3: Spin-channel decomposition of vertex correction
+ ! Computed from lambda_corr and dressed vertex data
+ if (nspinor == 2 .and. dvert%has_vertex) then
+   write(unt,'(a)') '#'
+   write(unt,'(a)') '# Section 3: Spin-channel decomposition of vertex correction at iOm=0'
+   write(unt,'(a)') '# Decomposition of Σ_{gamma,delta} |lambda^{gd}|^2 by spin channel'
+   write(unt,'(a)') '# mu  vtx_sc_weight  vtx_pm_weight  vtx_mp_weight  frac_sc  frac_pm  frac_mp'
+
+   do mu = 1, 3
+     vtx_sc = czero
+     vtx_pm = czero
+     vtx_mp = czero
+     vtx_total = czero
+
+     ! Sum over fermionic frequencies for lambda at iOm=0 (iom=1)
+     do iw = 1, dvert%niw_vertex
+       do igamma = 1, dvert%norb_corr
+         do idelta = 1, dvert%norb_corr
+           ! Use lambda for direction mu at iom=1
+           if (abs(dvert%lambda_corr(mu, 1, igamma, idelta, iw)) < tol16) cycle
+
+           ! Classify spin channel
+           if (igamma <= ndim_orb) then
+             ispin_g = 1
+           else
+             ispin_g = 2
+           end if
+           if (idelta <= ndim_orb) then
+             ispin_d = 1
+           else
+             ispin_d = 2
+           end if
+
+           if (ispin_g == ispin_d) then
+             vtx_sc = vtx_sc + abs(dvert%lambda_corr(mu, 1, igamma, idelta, iw))**2
+           else if (ispin_g == 1 .and. ispin_d == 2) then
+             vtx_pm = vtx_pm + abs(dvert%lambda_corr(mu, 1, igamma, idelta, iw))**2
+           else
+             vtx_mp = vtx_mp + abs(dvert%lambda_corr(mu, 1, igamma, idelta, iw))**2
+           end if
+         end do
+       end do
+     end do
+
+     vtx_total = vtx_sc + vtx_pm + vtx_mp
+     if (abs(vtx_total) > tol16) then
+       write(unt,'(i3,3es16.6,3f10.4)') mu, &
+         real(vtx_sc), real(vtx_pm), real(vtx_mp), &
+         real(vtx_sc)/real(vtx_total), real(vtx_pm)/real(vtx_total), &
+         real(vtx_mp)/real(vtx_total)
+     else
+       write(unt,'(i3,3es16.6,3a10)') mu, &
+         real(vtx_sc), real(vtx_pm), real(vtx_mp), &
+         ' undef', ' undef', ' undef'
+     end if
+   end do
+ end if
+
+ close(unt)
+
+ write(msg,'(3a)') ' write_optic_vertex_attrib: Written to ', trim(fname)
+ call wrtout(std_out, msg)
+
+end subroutine write_optic_vertex_attrib
+
+!!***
+
+!!****f* m_dmft_optic_kernel/zgemv_wrapper
+!! NAME
+!!  zgemv_wrapper
+!!
+!! FUNCTION
+!!  Simple matrix-vector multiply: y = A * x
+!!  For small to medium matrices used in BSE vertex equation.
+!!
+!! SOURCE
+
+subroutine zgemv_wrapper(n, A, x, y)
+
+ integer, intent(in) :: n
+ complex(dp), intent(in) :: A(n, n), x(n)
+ complex(dp), intent(out) :: y(n)
+
+!Local variables
+ integer :: ii, jj
+ complex(dp) :: acc
+
+! *********************************************************************
+
+ do ii = 1, n
+   acc = czero
+   do jj = 1, n
+     acc = acc + A(ii, jj) * x(jj)
+   end do
+   y(ii) = acc
+ end do
+
+end subroutine zgemv_wrapper
 
 !!***
 

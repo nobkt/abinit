@@ -51,7 +51,10 @@ MODULE m_dmft_absorption_driver
                                 & compute_bubble_conductivity, write_optic_kernel, &
                                 & optic_orbital_attrib_type, init_optic_orbital_attrib, &
                                 & destroy_optic_orbital_attrib, compute_optic_orbital_attrib, &
-                                & write_optic_orbital_attrib
+                                & write_optic_orbital_attrib, &
+                                & dressed_vertex_type, init_dressed_vertex, destroy_dressed_vertex, &
+                                & compute_dressed_current_vertex, compute_vertex_conductivity, &
+                                & write_optic_vertex_attrib
  use m_dmft_spectral_attribution, only : spectral_attribution_type, &
    & init_spectral_attribution, destroy_spectral_attribution, &
    & compute_spectral_attribution, write_spectral_attribution, &
@@ -111,6 +114,7 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc, green_imp)
  type(lattice_bse_type) :: latt_bse
  type(optic_kernel_type) :: optic_kern
  type(optic_orbital_attrib_type) :: optic_orb_attrib
+ type(dressed_vertex_type) :: dressed_vert
  type(spinor_proj_type) :: sproj
  type(spectral_attribution_type) :: attrib_tmp
  type(spectral_attribution_type) :: attrib_imp
@@ -475,6 +479,46 @@ subroutine dmft_absorption_run(dtset, paw_dmft, cryst_struc, green_imp)
 
      call destroy_optic_orbital_attrib(optic_orb_attrib)
    end if
+
+   ! =====================================================================
+   ! Stage 5b: Vertex-corrected optical conductivity
+   ! =====================================================================
+   ! Compute the dressed current vertex from the irreducible vertex Gamma_imp
+   ! and the lattice bubble chi0_latt, then compute the vertex correction
+   ! to the optical conductivity Pi_vertex.
+   write(msg,'(a)') ' Stage 5b: Computing vertex-corrected optical conductivity'
+   call wrtout(std_out, msg)
+
+   call init_dressed_vertex(dressed_vert, 3, nboson, norb_corr, niw_vertex)
+
+   ! Re-populate spinor projectors for the first valid correlated atom
+   iatom_latt_count = 0
+   do iatom = 1, paw_dmft%natom
+     if (paw_dmft%lpawu(iatom) < 0) cycle
+     if (paw_dmft%lpawu(iatom) /= paw_dmft%maxlpawu) cycle
+     iatom_latt_count = iatom_latt_count + 1
+     if (iatom_latt_count == 1) then
+       call populate_from_chipsi(sproj, paw_dmft, iatom)
+       exit
+     end if
+   end do
+
+   call compute_dressed_current_vertex(dressed_vert, paw_dmft, sproj, &
+     & vertex_irr, latt_bse, nboson, niw_vertex, paw_dmft%nspinor, norb_corr)
+
+   if (dressed_vert%has_vertex) then
+     call compute_vertex_conductivity(optic_kern, paw_dmft, green_imp, dressed_vert, sproj, &
+       & nboson, niw_vertex, paw_dmft%nspinor)
+
+     ! Re-write optical kernel with updated total (now includes vertex)
+     call write_optic_kernel(optic_kern, 'DMFT_optic_kernel.dat', beta)
+   end if
+
+   ! Write vertex attribution output
+   call write_optic_vertex_attrib(optic_kern, dressed_vert, &
+     & 'DMFT_optic_vertex_attrib.dat', beta, paw_dmft%nspinor)
+
+   call destroy_dressed_vertex(dressed_vert)
 
    call destroy_optic_kernel(optic_kern)
  end if

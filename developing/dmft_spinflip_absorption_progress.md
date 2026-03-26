@@ -1335,4 +1335,204 @@ TRIQS/CT-HYB の G2_iw_ph と設計書 Section 5.7 の χ^imp は同一の Fouri
 | `DMFT_attrib_comparison.dat` | レベル間比較 | 不純物/格子/BSE の3段階比較（差分付き） |
 | `DMFT_optic_kernel.dat` | バブル光学伝導度 | Π_μν テンソルのスピンチャネル分解（SC/S⁺S⁻/S⁻S⁺） |
 | `DMFT_attrib_optic_orbital.dat` | 光学伝導度（軌道分解） | カバー率、軌道ペア分解、ランキング、周波数依存性 |
-| `DMFT_chi_imp_measured.dat` | 測定 χ^imp [NEW] | TRIQS G2_iw_ph から変換された不純物二粒子相関関数 |
+| `DMFT_chi_imp_measured.dat` | 測定 χ^imp | TRIQS G2_iw_ph から変換された不純物二粒子相関関数 |
+
+---
+
+## Phase 26: k 点 MPI 並列化（完了）
+
+### 24. 格子バブル・光学伝導度の k 点 MPI 並列化（Phase 26: 完了）
+
+**目的:** `compute_chi0_lattice`、`compute_bubble_conductivity`、`compute_optic_orbital_attrib` の k 点ループを MPI で分散し、大規模 k 点メッシュでの計算のスケーラビリティを確保する。
+
+**背景:**
+
+Phase 24 までの実装では、格子バブル χ₀^latt、バブル光学伝導度 Π_μν^bubble、および軌道ペア分解光学伝導度の k 点ループはすべて逐次実行されていた。これは全プロセスが全 k 点を処理する冗長計算であり、k 点数が増えると計算時間が線形に増大する。MnF₂ のような系では収束したスペクトルを得るために十分な k 点メッシュが必要であり、MPI 並列化は実用計算に不可避である。
+
+ABINIT の DMFT コードは `paw_dmft%distrib` 構造体（`mpi_distrib_dmft_type` 型）を通じて k 点分散を管理している。この構造体には:
+- `procb(nkpt)`: 各 k 点を処理するプロセスのランク（`comm_kpt` コミュニケータ内）
+- `me_kpt`: 現プロセスの `comm_kpt` 内ランク
+- `comm_kpt`: k 点コミュニケータ
+
+が含まれており、既存の DMFT コード（`m_green.F90`、`m_oper.F90` 等）はこのパターンを広く使用している。
+
+**実装した内容:**
+
+1. **`compute_chi0_lattice` の並列化** (`m_dmft_lattice_bse.F90`):
+
+   a. `use m_xmpi, only : xmpi_sum` をモジュールインポートに追加
+
+   b. k 点ループ内に分散チェックを追加:
+   ```fortran
+   if (paw_dmft%distrib%procb(ik) /= paw_dmft%distrib%me_kpt) cycle
+   ```
+   これにより、各プロセスは自身に割り当てられた k 点のみを処理する。
+
+   c. 全ループ終了後に MPI 削減を追加:
+   ```fortran
+   call xmpi_sum(lbse%chi0_latt, paw_dmft%distrib%comm_kpt, ierr)
+   ```
+   これにより、各プロセスの部分和が全プロセスに集約される。
+
+   d. `kpt_attrib` が存在する場合、per-k 帰属データも削減:
+   ```fortran
+   call xmpi_sum(kpt_attrib%chi0_k_total, paw_dmft%distrib%comm_kpt, ierr)
+   call xmpi_sum(kpt_attrib%chi0_k_sc, ...)
+   call xmpi_sum(kpt_attrib%chi0_k_pm, ...)
+   call xmpi_sum(kpt_attrib%chi0_k_mp, ...)
+   call xmpi_sum(kpt_attrib%chi0_k_pm_orb, ...)
+   call xmpi_sum(kpt_attrib%chi0_k_mp_orb, ...)
+   ```
+
+2. **`compute_bubble_conductivity` の並列化** (`m_dmft_optic_kernel.F90`):
+
+   a. `use m_xmpi, only : xmpi_sum` をモジュールインポートに追加
+
+   b. k 点ループ内に分散チェックを追加:
+   ```fortran
+   if (paw_dmft%distrib%procb(ikpt) /= paw_dmft%distrib%me_kpt) cycle
+   ```
+
+   c. 全ループ終了後に MPI 削減を追加:
+   ```fortran
+   call xmpi_sum(optic%pi_bubble, paw_dmft%distrib%comm_kpt, ierr)
+   call xmpi_sum(optic%pi_bubble_sc, ...)
+   call xmpi_sum(optic%pi_bubble_pm, ...)
+   call xmpi_sum(optic%pi_bubble_mp, ...)
+   ```
+
+3. **`compute_optic_orbital_attrib` の並列化** (`m_dmft_optic_kernel.F90`):
+
+   a. k 点ループ内に分散チェックを追加（同一パターン）
+
+   b. 全ループ終了後に MPI 削減を追加:
+   ```fortran
+   call xmpi_sum(orb_attrib%pi_projected_total, paw_dmft%distrib%comm_kpt, ierr)
+   call xmpi_sum(orb_attrib%pi_projected_sc, ...)
+   call xmpi_sum(orb_attrib%pi_orb_pm, ...)
+   call xmpi_sum(orb_attrib%pi_orb_mp, ...)
+   ```
+
+**MPI 正当性の保証:**
+
+- **再現性**: 1 プロセスでの実行時、`distrib%procb(ik) == distrib%me_kpt` が全 k 点で成立するため、`cycle` は実行されない。`xmpi_sum` は self-communicator に対してno-opとなるため、逐次実行と完全に等価な結果を与える。
+
+- **ladd パラメータとの互換性**: 多原子ループでの累積モード（`ladd=.true.`）は k 点合算の外側で行われる。各原子について k 点並列計算→MPI削減→累積の順序は正しい。
+
+- **k 点帰属データ**: `kpt_attrib%chi0_k_total(iom, ik)` は per-k データであり、各 k 点は1つのプロセスでのみ計算される。`xmpi_sum` により、全プロセスが全 k 点のデータを取得する。
+
+**物理的意味:**
+
+MPI 並列化は純粋に計算効率の改善であり、物理的な結果には一切影響しない。逐次実行と並列実行は浮動小数点丸め誤差を除いて同一の結果を与える。
+
+**変更ファイル:**
+- `src/68_dmft/m_dmft_lattice_bse.F90` — `compute_chi0_lattice` に MPI 分散チェックと削減を追加
+- `src/68_dmft/m_dmft_optic_kernel.F90` — `compute_bubble_conductivity` と `compute_optic_orbital_attrib` に MPI 分散チェックと削減を追加
+
+---
+
+### 正直な到達点の評価（Phase 26 時点）
+
+**現時点で完成しているもの:**
+- 入力変数体系と整合性検査
+- 全モジュールのデータ構造定義
+- **不純物バブル χ₀^imp の完全な計算**
+- **多原子サポート**
+- **スピンチャネル帰属分解**（3チャネルへの厳密分解）
+- **軌道分解帰属**
+- **スピノル投影子の chipsi 接続**
+- **格子バブル χ₀^latt の完全な計算**
+- **多原子格子バブル**
+- **格子レベル帰属分解**
+- **レベル間帰属比較**
+- **帰属サマリーの物理量抽出**
+- **k 点分解格子バブル帰属**
+- **k 点分解軌道ペア帰属**
+- **周波数依存帰属プロファイル**
+- 既約頂点抽出の行列演算
+- 格子 BSE 解法の行列演算
+- Matsubara 軸での出力フォーマット
+- 高水準ドライバによる全ステージのオーケストレーション
+- DMFT ループから吸収計算ドライバへの呼び出し接続
+- **運動量行列要素 <ψ_a|−i∇|ψ_b> の計算**
+- **バブル光学伝導度 Π_μν^bubble の完全な計算**
+- **光学伝導度のスピンチャネル帰属分解**
+- **PAW nabla_ij の自動初期化**
+- **光学伝導度の軌道ペア分解**
+- **TRIQS G2_iw_ph 測定インターフェース**
+- **G2 → chi_loc 変換**
+- **DMFT 収束後の G2 測定呼び出し**
+- **k 点 MPI 並列化**（格子バブル、バブル光学伝導度、軌道ペア分解） [NEW]
+
+**現時点で完成していないもの:**
+
+1. **TRIQS G2_iw_ph API の実テスト**: コンパイル環境の制約により、G2 データ抽出ロジックの実行時検証は未完了。TRIQS 環境でのテストが必要。
+
+2. **`compute_psinablapsi_dmft` の MPI 並列化**: 運動量行列要素の計算も k 点ループを含むが、この関数は `vtorho` 内で呼び出されるため、`vtorho` 自身の k 点並列化機構（`mpi_enreg%proc_distrb` による分散）と整合させる必要がある。現在は `vtorho` の k 点ループ内で各プロセスが自身の k 点のみ計算する設計になっているため、追加の並列化は不要（`vtorho` の既存並列化がカバーしている）。ただし、`psinablapsi_dmft` 配列が全プロセスに完全に複製されているかどうかの検証が必要。
+
+3. **実周波数応答バックエンド**: `dmft_resp_mode=2` の実装。これがない限り、厳密な意味での吸収スペクトル α(ω) は完成しない。
+
+---
+
+## 次ステップで実装すべきこと
+
+### 次ステップ 0: TRIQS G2 インターフェースの実テスト（最優先）
+
+**目的:** Phase 25 で実装した G2 測定インターフェースを TRIQS 環境で実際にテストし、データ抽出が正しく動作することを確認する。
+
+**具体的な検証項目:**
+
+1. `solver.G2_iw_ph` へのアクセスが正しいこと（ポインタデリファレンスとブロックアクセス）
+2. ボソン/フェルミメッシュのインデックスオフセットが正しいこと
+3. `data()` テンソルの添字順序が (bos, fer, fer, o1, o2, o3, o4) であること
+4. `flavor_list` によるブロック→グローバルフレーバー添字変換が正しいこと
+5. 符号規約 χ = -G2 の検証: 既知の原子極限解（U=0 で χ = χ₀）との比較
+6. メモリ使用量の実測（小さなパラメータセットでの確認）
+
+**必要条件:** TRIQS/CT-HYB がインストールされた計算環境と MnF₂ テスト入力ファイル
+
+### 次ステップ 1: psinablapsi_dmft の MPI 通信検証
+
+**目的:** `compute_psinablapsi_dmft` が `vtorho` の k 点並列化と正しく整合していることを検証する。
+
+**確認事項:**
+1. `vtorho` 内で各プロセスが自身の k 点の `psinablapsi_dmft` のみを計算しているかどうか
+2. 計算後に `xmpi_sum` または `xmpi_allgatherv` で全プロセスに複製されているかどうか
+3. もし複製されていない場合、`compute_bubble_conductivity` と `compute_optic_orbital_attrib` が `procb(ikpt)` でスキップするため正しく動作するが、k 点帰属出力が不完全になる可能性がある
+
+### 次ステップ 2: 実周波数応答バックエンド（最難関）
+
+**目的:** `dmft_resp_mode=2` の実装
+
+**候補手法:**
+- 数値的解析接続は設計書で禁止されている（MaxEnt, Padé いずれも不可）
+- 許されるのは:
+  - (A) 実周波数の不純物応答を直接計算する補助ソルバー（例: NRG, ED, iPT）
+  - (B) Lehmann 表示を明示的に用いる定式化
+- 設計書の推奨は方針 A
+
+**この段階に到達するまでは、Matsubara 軸応答（dmft_resp_mode=1）までの出力に留める。**
+
+---
+
+## 帰属出力ファイル一覧（Phase 26 時点）
+
+Phase 25 時点と同一。MPI 並列化は出力ファイルに影響しない。
+
+| ファイル名 | レベル | 内容 |
+| --- | --- | --- |
+| `DMFT_attrib_chi0_imp_atom{N}.dat` | 不純物（原子別） | 原子 N の chi0_imp のスピン/軌道帰属 |
+| `DMFT_attrib_chi0_imp_total.dat` | 不純物（合算） | 全原子合算の chi0_imp のスピン/軌道帰属 |
+| `DMFT_attrib_summary_imp.dat` | 不純物サマリー | 静的感受率・チャネル分率・収束診断・軌道ランキング |
+| `DMFT_attrib_freqprofile_imp.dat` | 不純物プロファイル | 周波数依存帰属プロファイル（支配チャネル/軌道） |
+| `DMFT_attrib_chi0_lattice.dat` | 格子バブル | 格子バブル chi0_latt のスピン/軌道帰属 |
+| `DMFT_attrib_chi0_kpoint.dat` | 格子バブル（k分解） | k 点分解スピンチャネル + 軌道ペア分解 + ランキング |
+| `DMFT_attrib_summary_latt.dat` | 格子サマリー | 格子レベルの静的感受率・軌道ランキング |
+| `DMFT_attrib_freqprofile_latt.dat` | 格子プロファイル | 周波数依存帰属プロファイル（支配チャネル/軌道） |
+| `DMFT_attrib_chi_full.dat` | BSE 全感受率 | BSE 補正後 chi_full のスピン/軌道帰属 |
+| `DMFT_attrib_summary_bse.dat` | BSE サマリー | BSE レベルの静的感受率・軌道ランキング |
+| `DMFT_attrib_freqprofile_bse.dat` | BSE プロファイル | 周波数依存帰属プロファイル（支配チャネル/軌道） |
+| `DMFT_attrib_comparison.dat` | レベル間比較 | 不純物/格子/BSE の3段階比較（差分付き） |
+| `DMFT_optic_kernel.dat` | バブル光学伝導度 | Π_μν テンソルのスピンチャネル分解（SC/S⁺S⁻/S⁻S⁺） |
+| `DMFT_attrib_optic_orbital.dat` | 光学伝導度（軌道分解） | カバー率、軌道ペア分解、ランキング、周波数依存性 |
+| `DMFT_chi_imp_measured.dat` | 測定 χ^imp | TRIQS G2_iw_ph から変換された不純物二粒子相関関数 |
